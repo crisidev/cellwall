@@ -23,6 +23,55 @@ pub enum BindMountResult {
     InvalidTarget,
 }
 
+/// Unescape octal sequences in mount paths
+/// Based on bubblewrap's unescape_inline function (bind-mount.c lines 40-66)
+/// Mountinfo encodes spaces and other special characters as octal escapes like \040
+fn unescape_path(escaped: &str) -> String {
+    let mut result = String::with_capacity(escaped.len());
+    let mut chars = escaped.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            // Check if we have 3 octal digits following
+            let mut octal_chars = Vec::new();
+            for _ in 0..3 {
+                if let Some(&next_ch) = chars.peek() {
+                    if next_ch.is_ascii_digit() && next_ch <= '7' {
+                        octal_chars.push(next_ch);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            if octal_chars.len() == 3 {
+                // Parse octal number
+                let octal_str: String = octal_chars.into_iter().collect();
+                if let Ok(byte_val) = u8::from_str_radix(&octal_str, 8) {
+                    result.push(byte_val as char);
+                } else {
+                    // If parsing fails, keep the backslash and digits
+                    result.push('\\');
+                    result.push_str(&octal_str);
+                }
+            } else {
+                // Not a valid octal escape, keep the backslash
+                result.push('\\');
+                for ch in octal_chars {
+                    result.push(ch);
+                }
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+
+    result
+}
+
 /// Parse mount options from a comma-separated string into MsFlags
 /// Based on bubblewrap's decode_mountoptions function
 fn parse_mount_options(options: &str) -> MsFlags {
@@ -66,7 +115,7 @@ fn get_mount_flags(mount_point: &Path) -> Result<Option<MsFlags>> {
 
         // Format: mount_id parent_id major:minor root mount_point options ...
         // mount_point is at index 4, options at index 5
-        let mount_path = PathBuf::from(parts[4]);
+        let mount_path = PathBuf::from(unescape_path(parts[4]));
 
         // Check if this is the mount we're looking for
         if mount_path == canonical {
@@ -127,7 +176,7 @@ fn parse_submounts(root_mount: &Path) -> Result<Vec<(PathBuf, MsFlags)>> {
         let parent_id = parts[1]
             .parse::<i32>()
             .context("Failed to parse parent_id")?;
-        let mount_point = PathBuf::from(parts[4]);
+        let mount_point = PathBuf::from(unescape_path(parts[4]));
         let options = parse_mount_options(parts[5]);
 
         // Find the root mount (the one we just created)
@@ -272,6 +321,8 @@ pub fn bind_mount<P: AsRef<Path>, Q: AsRef<Path>>(
         "Performing initial bind mount with flags: {:?}",
         mount_flags
     );
+    // Add MS_SILENT to suppress kernel warnings (matches bubblewrap)
+    mount_flags |= MsFlags::MS_SILENT;
     mount(Some(source), dest, None::<&str>, mount_flags, None::<&str>).wrap_err_with(|| {
         format!(
             "Failed to bind mount {} to {}",
@@ -310,7 +361,8 @@ pub fn bind_mount<P: AsRef<Path>, Q: AsRef<Path>>(
     };
 
     // Build new flags by OR'ing existing flags with our security requirements
-    let mut remount_flags = MsFlags::MS_BIND | MsFlags::MS_REMOUNT | existing_flags;
+    let mut remount_flags =
+        MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_SILENT | existing_flags;
 
     // Always add MS_NOSUID for security (prevents setuid escalation)
     log::debug!("Applying nosuid restriction (always for security)");
@@ -343,8 +395,9 @@ pub fn bind_mount<P: AsRef<Path>, Q: AsRef<Path>>(
     //
     // The key insight from bubblewrap:
     // 1. Use realpath() on the destination AFTER the mount to resolve symlinks
-    // 2. Parse mountinfo using the resolved destination path
-    // 3. Remount submounts using the exact paths from mountinfo
+    // 2. Open the destination with O_PATH and readlink /proc/self/fd/<fd>
+    // 3. Parse mountinfo using the kernel's path representation
+    // 4. Remount submounts using the exact paths from mountinfo
     if flags.contains(BindMountFlags::RECURSIVE) {
         log::debug!("Applying flags to submounts (recursive bind mount)");
 
@@ -360,9 +413,39 @@ pub fn bind_mount<P: AsRef<Path>, Q: AsRef<Path>>(
             resolved_dest.display()
         );
 
-        // Parse submounts under the resolved destination
+        // Open the destination with O_PATH to get a file descriptor
+        // Then read /proc/self/fd/<fd> to get the kernel's path representation
+        // This handles case-insensitive filesystems correctly (bubblewrap lines 408-436)
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::io::AsRawFd;
+
+        let dest_file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_CLOEXEC)
+            .open(&resolved_dest)
+            .wrap_err_with(|| {
+                format!(
+                    "Failed to open destination with O_PATH: {}",
+                    resolved_dest.display()
+                )
+            })?;
+
+        let dest_fd = dest_file.as_raw_fd();
+        let fd_path = format!("/proc/self/fd/{}", dest_fd);
+
+        // Read the symlink to get the kernel's representation of the path
+        let kernel_path = std::fs::read_link(&fd_path)
+            .wrap_err_with(|| format!("Failed to readlink {}", fd_path))?;
+
+        log::debug!(
+            "Kernel path representation: {} (from {})",
+            kernel_path.display(),
+            fd_path
+        );
+
+        // Parse submounts under the kernel's path representation
         // This gives us the exact paths as they appear in /proc/self/mountinfo
-        match parse_submounts(&resolved_dest) {
+        match parse_submounts(&kernel_path) {
             Ok(submounts) => {
                 for (submount_path, existing_flags) in submounts {
                     log::debug!(
@@ -383,7 +466,10 @@ pub fn bind_mount<P: AsRef<Path>, Q: AsRef<Path>>(
 
                     // Build new flags by OR'ing existing flags with security requirements
                     // This matches bubblewrap's logic at lines 469-470
-                    let mut new_flags = MsFlags::MS_BIND | MsFlags::MS_REMOUNT | existing_flags;
+                    let mut new_flags = MsFlags::MS_BIND
+                        | MsFlags::MS_REMOUNT
+                        | MsFlags::MS_SILENT
+                        | existing_flags;
                     new_flags |= MsFlags::MS_NOSUID;
 
                     if flags.contains(BindMountFlags::READONLY) {

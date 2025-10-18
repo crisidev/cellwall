@@ -11,7 +11,7 @@ pub fn mount_proc<P: AsRef<Path>>(target: P) -> Result<()> {
         Some("proc"),
         target.as_ref(),
         Some("proc"),
-        MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
+        MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV | MsFlags::MS_SILENT,
         None::<&str>,
     )
     .wrap_err_with(|| format!("Failed to mount proc on {}", target.as_ref().display()))?;
@@ -51,7 +51,10 @@ fn cover_dangerous_proc_dirs<P: AsRef<Path>>(proc_mount: P) -> Result<()> {
                         Some(subdir.as_path()),
                         &subdir,
                         None::<&str>,
-                        MsFlags::MS_BIND | MsFlags::MS_RDONLY | MsFlags::MS_REMOUNT,
+                        MsFlags::MS_BIND
+                            | MsFlags::MS_RDONLY
+                            | MsFlags::MS_REMOUNT
+                            | MsFlags::MS_SILENT,
                         None::<&str>,
                     ) {
                         // If we can't remount it, that's OK - it might already be read-only
@@ -108,7 +111,7 @@ pub fn mount_tmpfs<P: AsRef<Path>>(target: P, mode: u32, size: Option<usize>) ->
         Some("tmpfs"),
         target.as_ref(),
         Some("tmpfs"),
-        MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+        MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_SILENT,
         Some(options.as_str()),
     )
     .wrap_err_with(|| format!("Failed to mount tmpfs on {}", target.as_ref().display()))?;
@@ -124,7 +127,7 @@ pub fn mount_devpts<P: AsRef<Path>>(target: P) -> Result<()> {
         Some("devpts"),
         target.as_ref(),
         Some("devpts"),
-        MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC,
+        MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_SILENT,
         Some("newinstance,ptmxmode=0666,mode=620"),
     )
     .wrap_err_with(|| format!("Failed to mount devpts on {}", target.as_ref().display()))?;
@@ -140,7 +143,7 @@ pub fn mount_mqueue<P: AsRef<Path>>(target: P) -> Result<()> {
         Some("mqueue"),
         target.as_ref(),
         Some("mqueue"),
-        MsFlags::empty(),
+        MsFlags::MS_SILENT,
         None::<&str>,
     )
     .wrap_err_with(|| format!("Failed to mount mqueue on {}", target.as_ref().display()))?;
@@ -156,7 +159,7 @@ pub fn remount_ro<P: AsRef<Path>>(target: P) -> Result<()> {
         None::<&str>,
         target.as_ref(),
         None::<&str>,
-        MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY,
+        MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY | MsFlags::MS_SILENT,
         None::<&str>,
     )
     .wrap_err_with(|| {
