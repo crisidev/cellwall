@@ -11,6 +11,7 @@ pub mod namespace;
 pub mod network;
 pub mod sandbox;
 pub mod setup;
+pub mod status;
 pub mod utils;
 
 pub use eyre::Result;

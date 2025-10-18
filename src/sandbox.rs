@@ -6,6 +6,7 @@ use crate::mount::make_slave;
 use crate::namespace::{unshare_namespaces, write_uid_gid_map};
 use crate::network::setup_loopback;
 use crate::setup::{SetupOp, execute_setup_op};
+use crate::status;
 use eyre::{Context, Result};
 use nix::sched::CloneFlags;
 use nix::sys::wait::{WaitStatus, waitpid};
@@ -34,6 +35,8 @@ pub struct SandboxConfig {
     pub cap_add: Vec<String>,
     pub cap_drop: Vec<String>,
     pub seccomp_fd: Option<i32>,
+    pub info_fd: Option<i32>,
+    pub json_status_fd: Option<i32>,
 }
 
 impl SandboxConfig {
@@ -258,6 +261,8 @@ impl SandboxConfig {
             cap_add: args.cap_add.clone(),
             cap_drop: args.cap_drop.clone(),
             seccomp_fd: args.seccomp,
+            info_fd: args.info_fd,
+            json_status_fd: args.json_status_fd,
         })
     }
 }
@@ -340,30 +345,101 @@ pub fn run_sandbox(config: SandboxConfig) -> Result<()> {
         log::debug!("Enabling CLONE_NEWCGROUP (cgroup namespace)");
     }
 
+    // Determine if we need to fork for monitoring/status reporting
+    let needs_fork = needs_pid_ns || config.info_fd.is_some() || config.json_status_fd.is_some();
+
     // Only unshare if we have namespaces to create
     if !clone_flags.is_empty() {
         log::info!("Unsharing namespaces: {:?}", clone_flags);
         unshare_namespaces(clone_flags)?;
         log::debug!("Successfully unshared namespaces");
 
-        // If we created a PID namespace, we need to fork so the child enters it
-        if needs_pid_ns {
-            log::debug!("PID namespace created, forking to enter it...");
+        // Fork if we need PID namespace or status reporting
+        if needs_fork {
+            log::debug!("Forking for PID namespace and/or status reporting...");
             match unsafe { fork() }? {
                 ForkResult::Parent { child } => {
-                    // Parent: wait for child and exit with its status
+                    // Parent: report status, wait for child and exit with its status
                     log::debug!("Parent process waiting for child PID {}", child);
+
+                    // Report sandbox information if requested
+                    if config.info_fd.is_some() || config.json_status_fd.is_some() {
+                        log::debug!("Reading namespace IDs for child PID {}", child);
+                        // Read namespace IDs from the child process
+                        match status::read_namespace_ids(child.as_raw()) {
+                            Ok(namespaces) => {
+                                // Report info_fd format
+                                if let Some(fd) = config.info_fd {
+                                    log::debug!("Reporting status to info_fd {}", fd);
+                                    if let Err(e) =
+                                        status::report_info(fd, child.as_raw(), &namespaces)
+                                    {
+                                        log::warn!("Failed to write to info_fd: {}", e);
+                                    }
+                                }
+
+                                // Report json_status_fd format
+                                if let Some(fd) = config.json_status_fd {
+                                    log::debug!("Reporting status to json_status_fd {}", fd);
+                                    if let Err(e) =
+                                        status::report_json_status(fd, child.as_raw(), &namespaces)
+                                    {
+                                        log::warn!("Failed to write to json_status_fd: {}", e);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!("Failed to read namespace IDs: {}", e);
+                            }
+                        }
+                    }
+
+                    // Wait for child to exit
                     match waitpid(child, None)? {
                         WaitStatus::Exited(_, status) => {
                             log::debug!("Child exited with status {}", status);
+
+                            // Report exit status to json_status_fd if configured
+                            if let Some(fd) = config.json_status_fd {
+                                if let Err(e) = status::report_exit_status(fd, status) {
+                                    log::warn!(
+                                        "Failed to write exit status to json_status_fd: {}",
+                                        e
+                                    );
+                                }
+                            }
+
                             std::process::exit(status);
                         }
                         WaitStatus::Signaled(_, sig, _) => {
                             log::debug!("Child terminated by signal {}", sig);
-                            std::process::exit(128 + sig as i32);
+                            let exit_code = 128 + sig as i32;
+
+                            // Report exit status to json_status_fd if configured
+                            if let Some(fd) = config.json_status_fd {
+                                if let Err(e) = status::report_exit_status(fd, exit_code) {
+                                    log::warn!(
+                                        "Failed to write exit status to json_status_fd: {}",
+                                        e
+                                    );
+                                }
+                            }
+
+                            std::process::exit(exit_code);
                         }
                         _ => {
                             log::debug!("Child exited with unknown status");
+
+                            // Report exit status to json_status_fd if configured
+                            if let Some(fd) = config.json_status_fd {
+                                if let Err(e) = status::report_exit_status(fd, 1) {
+                                    log::warn!(
+                                        "Failed to write exit status to json_status_fd: {}",
+                                        e
+                                    );
+                                }
+                            }
+
                             std::process::exit(1);
                         }
                     }
@@ -374,8 +450,85 @@ pub fn run_sandbox(config: SandboxConfig) -> Result<()> {
                 }
             }
         }
+    } else if needs_fork {
+        // Even without namespaces, we need to fork if status reporting is requested
+        log::debug!("Forking for status reporting (no namespaces)...");
+        match unsafe { fork() }? {
+            ForkResult::Parent { child } => {
+                log::debug!("Parent process monitoring child PID {}", child);
+
+                // Report sandbox information if requested
+                if config.info_fd.is_some() || config.json_status_fd.is_some() {
+                    log::debug!("Reading namespace IDs for child PID {}", child);
+                    match status::read_namespace_ids(child.as_raw()) {
+                        Ok(namespaces) => {
+                            if let Some(fd) = config.info_fd {
+                                log::debug!("Reporting status to info_fd {}", fd);
+                                if let Err(e) = status::report_info(fd, child.as_raw(), &namespaces)
+                                {
+                                    log::warn!("Failed to write to info_fd: {}", e);
+                                }
+                            }
+
+                            if let Some(fd) = config.json_status_fd {
+                                log::debug!("Reporting status to json_status_fd {}", fd);
+                                if let Err(e) =
+                                    status::report_json_status(fd, child.as_raw(), &namespaces)
+                                {
+                                    log::warn!("Failed to write to json_status_fd: {}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to read namespace IDs: {}", e);
+                        }
+                    }
+                }
+
+                // Wait for child to exit
+                match waitpid(child, None)? {
+                    WaitStatus::Exited(_, status) => {
+                        log::debug!("Child exited with status {}", status);
+
+                        if let Some(fd) = config.json_status_fd {
+                            if let Err(e) = status::report_exit_status(fd, status) {
+                                log::warn!("Failed to write exit status to json_status_fd: {}", e);
+                            }
+                        }
+
+                        std::process::exit(status);
+                    }
+                    WaitStatus::Signaled(_, sig, _) => {
+                        log::debug!("Child terminated by signal {}", sig);
+                        let exit_code = 128 + sig as i32;
+
+                        if let Some(fd) = config.json_status_fd {
+                            if let Err(e) = status::report_exit_status(fd, exit_code) {
+                                log::warn!("Failed to write exit status to json_status_fd: {}", e);
+                            }
+                        }
+
+                        std::process::exit(exit_code);
+                    }
+                    _ => {
+                        log::debug!("Child exited with unknown status");
+
+                        if let Some(fd) = config.json_status_fd {
+                            if let Err(e) = status::report_exit_status(fd, 1) {
+                                log::warn!("Failed to write exit status to json_status_fd: {}", e);
+                            }
+                        }
+
+                        std::process::exit(1);
+                    }
+                }
+            }
+            ForkResult::Child => {
+                log::debug!("Child process continuing with sandbox setup...");
+            }
+        }
     } else {
-        log::debug!("No namespaces to create, skipping unshare");
+        log::debug!("No namespaces to create and no status reporting, skipping fork");
     }
 
     // Setup user namespace mappings if needed
@@ -733,6 +886,8 @@ mod tests {
             cap_add: vec![],
             cap_drop: vec![],
             seccomp: None,
+            info_fd: None,
+            json_status_fd: None,
             log_level: "warn".to_string(),
             command: vec!["test".to_string()],
         }

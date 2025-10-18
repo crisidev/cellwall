@@ -169,6 +169,14 @@ pub struct Args {
     #[arg(long, value_name = "FD")]
     pub seccomp: Option<i32>,
 
+    /// Write information about the running container to FD
+    #[arg(long, value_name = "FD")]
+    pub info_fd: Option<i32>,
+
+    /// Write container status to FD as multiple JSON documents
+    #[arg(long, value_name = "FD")]
+    pub json_status_fd: Option<i32>,
+
     /// Set logging level (error, warn, info, debug, trace)
     #[arg(long, value_name = "LEVEL", default_value = "warn")]
     pub log_level: String,
