@@ -7,9 +7,11 @@ use std::path::PathBuf;
 #[command(name = "cellwall")]
 #[command(version)]
 #[command(about = "Run applications in a sandbox using Linux namespaces")]
-#[command(long_about = "Cellwall is a Rust reimplementation of bubblewrap, a setuid implementation \
+#[command(
+    long_about = "Cellwall is a Rust reimplementation of bubblewrap, a setuid implementation \
                         of a subset of user namespaces. It allows unprivileged users to run \
-                        applications in isolated environments.")]
+                        applications in isolated environments."
+)]
 pub struct Args {
     /// Create a new user namespace
     #[arg(long)]
@@ -188,15 +190,15 @@ impl Args {
         }
 
         // With clap's num_args = 2, these should always be even, but validate anyway
-        if self.bind.len() % 2 != 0 {
+        if !self.bind.len().is_multiple_of(2) {
             eyre::bail!("--bind requires pairs of source and destination");
         }
 
-        if self.ro_bind.len() % 2 != 0 {
+        if !self.ro_bind.len().is_multiple_of(2) {
             eyre::bail!("--ro-bind requires pairs of source and destination");
         }
 
-        if self.symlink.len() % 2 != 0 {
+        if !self.symlink.len().is_multiple_of(2) {
             eyre::bail!("--symlink requires pairs of source and destination");
         }
 

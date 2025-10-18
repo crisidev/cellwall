@@ -1,7 +1,7 @@
 //! Utility functions
 
-use eyre::{bail, Result};
-use nix::fcntl::{openat, OFlag};
+use eyre::{Result, bail};
+use nix::fcntl::{OFlag, openat};
 use nix::sys::stat::Mode;
 use nix::unistd::{close, read};
 use std::fs::{self, File, Permissions};
@@ -109,11 +109,11 @@ pub fn ensure_file<P: AsRef<Path>>(path: P, mode: u32) -> Result<()> {
 
 /// Create parent directories with given permissions
 pub fn create_parent_dirs<P: AsRef<Path>>(path: P, mode: u32) -> Result<()> {
-    if let Some(parent) = path.as_ref().parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent)?;
-            fs::set_permissions(parent, Permissions::from_mode(mode))?;
-        }
+    if let Some(parent) = path.as_ref().parent()
+        && !parent.exists()
+    {
+        fs::create_dir_all(parent)?;
+        fs::set_permissions(parent, Permissions::from_mode(mode))?;
     }
     Ok(())
 }
@@ -122,12 +122,12 @@ pub fn create_parent_dirs<P: AsRef<Path>>(path: P, mode: u32) -> Result<()> {
 pub fn close_extra_fds(excluded: &[RawFd]) -> Result<()> {
     for entry in fs::read_dir("/proc/self/fd")? {
         let entry = entry?;
-        if let Ok(fd_str) = entry.file_name().into_string() {
-            if let Ok(fd) = fd_str.parse::<RawFd>() {
-                if !excluded.contains(&fd) && fd > 2 {
-                    close(fd).ok();
-                }
-            }
+        if let Ok(fd_str) = entry.file_name().into_string()
+            && let Ok(fd) = fd_str.parse::<RawFd>()
+            && !excluded.contains(&fd)
+            && fd > 2
+        {
+            close(fd).ok();
         }
     }
 

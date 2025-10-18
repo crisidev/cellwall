@@ -1,7 +1,7 @@
 //! Bind mount operations
 
 use eyre::{Context, Result};
-use nix::mount::{mount, MsFlags};
+use nix::mount::{MsFlags, mount};
 use std::path::Path;
 
 bitflags::bitflags! {
@@ -43,14 +43,7 @@ pub fn bind_mount<P: AsRef<Path>, Q: AsRef<Path>>(
     }
 
     // Perform the bind mount
-    mount(
-        Some(source),
-        dest,
-        None::<&str>,
-        mount_flags,
-        None::<&str>,
-    )
-    .wrap_err_with(|| {
+    mount(Some(source), dest, None::<&str>, mount_flags, None::<&str>).wrap_err_with(|| {
         format!(
             "Failed to bind mount {} to {}",
             source.display(),
@@ -62,28 +55,16 @@ pub fn bind_mount<P: AsRef<Path>, Q: AsRef<Path>>(
     if flags.contains(BindMountFlags::READONLY) {
         let ro_flags = MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY;
 
-        mount(
-            Some(source),
-            dest,
-            None::<&str>,
-            ro_flags,
-            None::<&str>,
-        )
-        .wrap_err("Failed to remount as read-only")?;
+        mount(Some(source), dest, None::<&str>, ro_flags, None::<&str>)
+            .wrap_err("Failed to remount as read-only")?;
     }
 
     // Apply device restrictions if needed
     if !flags.contains(BindMountFlags::DEVICES) {
         let nodev_flags = MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_NODEV;
 
-        mount(
-            Some(source),
-            dest,
-            None::<&str>,
-            nodev_flags,
-            None::<&str>,
-        )
-        .wrap_err("Failed to apply nodev flag")?;
+        mount(Some(source), dest, None::<&str>, nodev_flags, None::<&str>)
+            .wrap_err("Failed to apply nodev flag")?;
     }
 
     Ok(BindMountResult::Success)

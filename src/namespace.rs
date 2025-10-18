@@ -1,7 +1,7 @@
 //! Namespace management
 
 use eyre::{Context, Result};
-use nix::sched::{unshare, CloneFlags};
+use nix::sched::{CloneFlags, unshare};
 use nix::sys::stat::stat;
 use nix::unistd::{Gid, Pid, Uid};
 use std::fs;
@@ -38,6 +38,7 @@ pub fn unshare_namespaces(flags: CloneFlags) -> Result<()> {
 }
 
 /// Write UID/GID mappings for user namespace
+#[allow(clippy::too_many_arguments)]
 pub fn write_uid_gid_map(
     _proc_fd: RawFd,
     sandbox_uid: Uid,
@@ -50,7 +51,9 @@ pub fn write_uid_gid_map(
     overflow_uid: Uid,
     overflow_gid: Gid,
 ) -> Result<()> {
-    let pid_str = pid.map(|p| p.to_string()).unwrap_or_else(|| "self".to_string());
+    let pid_str = pid
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "self".to_string());
 
     // Build UID map
     let uid_map = if map_root && parent_uid.as_raw() != 0 && sandbox_uid.as_raw() != 0 {

@@ -1,7 +1,7 @@
 //! Capability management
 
 use eyre::{Context, Result};
-use nix::unistd::{setgid, setuid, Gid, Uid};
+use nix::unistd::{Gid, Uid, setgid, setuid};
 
 /// Drop all capabilities
 pub fn drop_all_caps() -> Result<()> {
@@ -27,7 +27,9 @@ pub fn set_required_caps() -> Result<()> {
         Capability::CAP_SETUID,
         Capability::CAP_SETGID,
         Capability::CAP_SYS_PTRACE,
-    ].into_iter().collect();
+    ]
+    .into_iter()
+    .collect();
 
     caps::set(None, caps::CapSet::Effective, &required_caps)
         .wrap_err("Failed to set effective capabilities")?;
@@ -87,7 +89,10 @@ fn set_keepcaps(keep: bool) -> Result<()> {
     unsafe {
         let ret = libc::prctl(libc::PR_SET_KEEPCAPS, if keep { 1 } else { 0 }, 0, 0, 0);
         if ret != 0 {
-            eyre::bail!("Failed to set PR_SET_KEEPCAPS: {}", std::io::Error::last_os_error());
+            eyre::bail!(
+                "Failed to set PR_SET_KEEPCAPS: {}",
+                std::io::Error::last_os_error()
+            );
         }
     }
     Ok(())

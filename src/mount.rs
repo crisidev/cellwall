@@ -1,7 +1,7 @@
 //! Filesystem mount operations
 
 use eyre::{Context, Result};
-use nix::mount::{mount, umount2, MntFlags, MsFlags};
+use nix::mount::{MntFlags, MsFlags, mount, umount2};
 use std::path::Path;
 
 /// Mount proc filesystem
@@ -75,7 +75,12 @@ pub fn remount_ro<P: AsRef<Path>>(target: P) -> Result<()> {
         MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY,
         None::<&str>,
     )
-    .wrap_err_with(|| format!("Failed to remount {} as read-only", target.as_ref().display()))?;
+    .wrap_err_with(|| {
+        format!(
+            "Failed to remount {} as read-only",
+            target.as_ref().display()
+        )
+    })?;
 
     Ok(())
 }

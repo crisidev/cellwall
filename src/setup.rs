@@ -1,6 +1,6 @@
 //! Sandbox setup operations
 
-use crate::bind_mount::{bind_mount, BindMountFlags};
+use crate::bind_mount::{BindMountFlags, bind_mount};
 use crate::mount::{mount_devpts, mount_proc, mount_tmpfs, remount_ro};
 use crate::utils::{create_parent_dirs, ensure_dir, ensure_file};
 use eyre::Result;
@@ -136,20 +136,19 @@ pub fn execute_setup_op(op: &SetupOp) -> Result<()> {
             create_parent_dirs(dest, 0o755)?;
 
             // Check if symlink already exists with correct target
-            if dest.is_symlink() || dest.exists() {
-                if let Ok(target) = fs::read_link(dest) {
-                    if target == Path::new(source) {
-                        // Already exists with correct target
-                        return Ok(());
-                    }
-                }
+            if (dest.is_symlink() || dest.exists())
+                && let Ok(target) = fs::read_link(dest)
+                && target == Path::new(source)
+            {
+                // Already exists with correct target
+                return Ok(());
             }
 
             // Try to create, ignore if already exists
-            if let Err(e) = symlink(source, dest) {
-                if e.kind() != std::io::ErrorKind::AlreadyExists {
-                    return Err(e.into());
-                }
+            if let Err(e) = symlink(source, dest)
+                && e.kind() != std::io::ErrorKind::AlreadyExists
+            {
+                return Err(e.into());
             }
         }
 

@@ -1,7 +1,7 @@
 //! Network namespace setup
 
 use eyre::{Context, Result};
-use nix::sys::socket::{socket, AddressFamily, SockFlag, SockType};
+use nix::sys::socket::{AddressFamily, SockFlag, SockType, socket};
 use std::os::unix::io::{AsRawFd, RawFd};
 
 const LOOPBACK_IFNAME: &str = "lo";
@@ -25,9 +25,7 @@ pub fn setup_loopback() -> Result<()> {
 
 /// Bring up a network interface
 fn bring_up_interface(sock: RawFd, ifname: &str) -> Result<()> {
-    use nix::libc::{
-        ifreq, IFF_UP, SIOCSIFFLAGS,
-    };
+    use nix::libc::{IFF_UP, SIOCSIFFLAGS, ifreq};
     use std::ffi::CString;
     use std::mem;
 

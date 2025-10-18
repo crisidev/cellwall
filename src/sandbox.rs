@@ -445,25 +445,27 @@ fn set_no_new_privs() -> Result<()> {
 
 /// Load seccomp BPF program (safer wrapper around prctl)
 unsafe fn load_seccomp_bpf(prog: *const libc::c_void) -> Result<()> {
-    const PR_SET_SECCOMP: libc::c_int = 22;
-    const SECCOMP_MODE_FILTER: libc::c_ulong = 2;
+    unsafe {
+        const PR_SET_SECCOMP: libc::c_int = 22;
+        const SECCOMP_MODE_FILTER: libc::c_ulong = 2;
 
-    let ret = libc::prctl(
-        PR_SET_SECCOMP,
-        SECCOMP_MODE_FILTER,
-        prog as libc::c_ulong,
-        0,
-        0,
-    );
-
-    if ret != 0 {
-        eyre::bail!(
-            "Failed to load seccomp filter: {}",
-            std::io::Error::last_os_error()
+        let ret = libc::prctl(
+            PR_SET_SECCOMP,
+            SECCOMP_MODE_FILTER,
+            prog as libc::c_ulong,
+            0,
+            0,
         );
-    }
 
-    Ok(())
+        if ret != 0 {
+            eyre::bail!(
+                "Failed to load seccomp filter: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+
+        Ok(())
+    }
 }
 
 /// Read from file descriptor (safer wrapper around libc::read)
