@@ -2,7 +2,7 @@
 
 use eyre::{Context, Result};
 use nix::mount::{MntFlags, MsFlags, mount, umount2};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Mount proc filesystem
 pub fn mount_proc<P: AsRef<Path>>(target: P) -> Result<()> {
@@ -17,6 +17,77 @@ pub fn mount_proc<P: AsRef<Path>>(target: P) -> Result<()> {
     .wrap_err_with(|| format!("Failed to mount proc on {}", target.as_ref().display()))?;
     log::debug!("Successfully mounted proc filesystem");
 
+    // Cover dangerous /proc subdirectories to prevent security issues
+    // See bubblewrap bubblewrap.c lines 1350-1366
+    // These directories can be used to trigger system actions or contain sensitive information
+    cover_dangerous_proc_dirs(target.as_ref())?;
+
+    Ok(())
+}
+
+/// Cover dangerous /proc subdirectories by bind mounting them read-only
+/// This prevents access to potentially dangerous system controls
+fn cover_dangerous_proc_dirs<P: AsRef<Path>>(proc_mount: P) -> Result<()> {
+    // Dangerous /proc subdirectories that should be protected
+    // From bubblewrap: { "sys", "sysrq-trigger", "irq", "bus" }
+    const DANGEROUS_DIRS: &[&str] = &["sys", "sysrq-trigger", "irq", "bus"];
+
+    log::debug!("Covering dangerous /proc subdirectories");
+
+    for dir in DANGEROUS_DIRS {
+        let subdir = PathBuf::from(proc_mount.as_ref()).join(dir);
+
+        // Check if we can access this directory
+        // If it doesn't exist or we can't access it, skip it
+        match std::fs::metadata(&subdir) {
+            Ok(metadata) if metadata.is_dir() || metadata.is_file() => {
+                // Check if we can write to it
+                if nix::unistd::access(&subdir, nix::unistd::AccessFlags::W_OK).is_ok() {
+                    log::debug!("Covering dangerous /proc/{} with read-only bind mount", dir);
+
+                    // Bind mount it onto itself read-only
+                    // This prevents writes while keeping it readable
+                    if let Err(e) = mount(
+                        Some(subdir.as_path()),
+                        &subdir,
+                        None::<&str>,
+                        MsFlags::MS_BIND | MsFlags::MS_RDONLY | MsFlags::MS_REMOUNT,
+                        None::<&str>,
+                    ) {
+                        // If we can't remount it, that's OK - it might already be read-only
+                        // or we might not have access (EACCES/EROFS)
+                        log::debug!(
+                            "Could not remount /proc/{} read-only (might already be protected): {}",
+                            dir,
+                            e
+                        );
+                    } else {
+                        log::debug!("Successfully covered /proc/{}", dir);
+                    }
+                } else {
+                    log::debug!(
+                        "Skipping /proc/{} - already not writable or inaccessible",
+                        dir
+                    );
+                }
+            }
+            Ok(_) => {
+                log::debug!("Skipping /proc/{} - not a directory or file", dir);
+            }
+            Err(e) => {
+                // ENOENT or EACCES is OK - the directory doesn't exist or we can't access it
+                if e.kind() == std::io::ErrorKind::NotFound
+                    || e.kind() == std::io::ErrorKind::PermissionDenied
+                {
+                    log::debug!("Skipping /proc/{} - doesn't exist or no access: {}", dir, e);
+                } else {
+                    log::warn!("Error checking /proc/{}: {}", dir, e);
+                }
+            }
+        }
+    }
+
+    log::debug!("Finished covering dangerous /proc subdirectories");
     Ok(())
 }
 

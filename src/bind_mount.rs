@@ -2,7 +2,8 @@
 
 use eyre::{Context, Result};
 use nix::mount::{MsFlags, mount};
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 bitflags::bitflags! {
     /// Bind mount flags
@@ -20,6 +21,41 @@ pub enum BindMountResult {
     SourceNotFound,
     PermissionDenied,
     InvalidTarget,
+}
+
+/// Parse /proc/self/mountinfo to find all submounts under a given path
+/// Returns a list of mount points that are children of the root_mount path
+fn parse_submounts(root_mount: &Path) -> Result<Vec<PathBuf>> {
+    log::debug!(
+        "Parsing /proc/self/mountinfo for submounts under {}",
+        root_mount.display()
+    );
+
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo")
+        .context("Failed to read /proc/self/mountinfo")?;
+
+    let mut submounts = Vec::new();
+
+    for line in mountinfo.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 5 {
+            continue;
+        }
+
+        // Format: mount_id parent_id major:minor root mount_point options...
+        // We want the mount_point (index 4)
+        let mount_point = PathBuf::from(parts[4]);
+
+        // Check if this mount point is under our root_mount
+        // and not equal to root_mount (we only want submounts)
+        if mount_point.starts_with(root_mount) && mount_point != root_mount {
+            log::debug!("Found submount: {}", mount_point.display());
+            submounts.push(mount_point);
+        }
+    }
+
+    log::debug!("Found {} submounts", submounts.len());
+    Ok(submounts)
 }
 
 /// Perform a bind mount
@@ -66,35 +102,89 @@ pub fn bind_mount<P: AsRef<Path>, Q: AsRef<Path>>(
     })?;
     log::debug!("Initial bind mount successful");
 
-    // Apply readonly and device flags if requested
-    // Important: We need to apply both flags in a single remount operation
+    // Apply security flags via remount
+    // Important: We need to apply all flags in a single remount operation
     // because separate remounts will override each other
-    let needs_remount =
-        flags.contains(BindMountFlags::READONLY) || !flags.contains(BindMountFlags::DEVICES);
+    //
+    // Security flags applied:
+    // - MS_NOSUID: Always applied to prevent setuid escalation (matches bubblewrap)
+    // - MS_RDONLY: Applied if READONLY flag is set
+    // - MS_NODEV: Applied unless DEVICES flag is set
+    let mut remount_flags = MsFlags::MS_BIND | MsFlags::MS_REMOUNT;
 
-    if needs_remount {
-        let mut remount_flags = MsFlags::MS_BIND | MsFlags::MS_REMOUNT;
+    // Always add MS_NOSUID for security (prevents setuid escalation)
+    log::debug!("Applying nosuid restriction (always for security)");
+    remount_flags |= MsFlags::MS_NOSUID;
 
-        if flags.contains(BindMountFlags::READONLY) {
-            log::debug!("Applying readonly flag");
-            remount_flags |= MsFlags::MS_RDONLY;
+    if flags.contains(BindMountFlags::READONLY) {
+        log::debug!("Applying readonly flag");
+        remount_flags |= MsFlags::MS_RDONLY;
+    }
+
+    if !flags.contains(BindMountFlags::DEVICES) {
+        log::debug!("Applying nodev restriction");
+        remount_flags |= MsFlags::MS_NODEV;
+    }
+
+    log::debug!("Remounting with flags: {:?}", remount_flags);
+    mount(
+        None::<&str>,
+        dest,
+        None::<&str>,
+        remount_flags,
+        None::<&str>,
+    )
+    .wrap_err("Failed to apply remount flags")?;
+    log::debug!("Successfully applied remount flags");
+
+    // Apply flags to all submounts when using recursive bind mounts
+    // This is necessary because bind mounts don't automatically apply flags to submounts
+    // See bubblewrap bind-mount.c lines 461-486
+    if flags.contains(BindMountFlags::RECURSIVE) {
+        log::debug!("Applying flags to submounts (recursive bind mount)");
+
+        // Resolve the destination path to handle symlinks
+        let resolved_dest = dest
+            .canonicalize()
+            .wrap_err_with(|| format!("Failed to canonicalize destination {}", dest.display()))?;
+
+        match parse_submounts(&resolved_dest) {
+            Ok(submounts) => {
+                for submount in submounts {
+                    log::debug!("Remounting submount: {}", submount.display());
+
+                    // Try to remount with the same flags
+                    // If we get EACCES (permission denied), that's OK - it means the user
+                    // can't access it anyway, so it doesn't need extra protection
+                    match mount(
+                        None::<&str>,
+                        &submount,
+                        None::<&str>,
+                        remount_flags,
+                        None::<&str>,
+                    ) {
+                        Ok(_) => {
+                            log::debug!("Successfully remounted submount: {}", submount.display());
+                        }
+                        Err(nix::errno::Errno::EACCES) => {
+                            log::debug!(
+                                "Ignoring EACCES for submount {} (user can't access it anyway)",
+                                submount.display()
+                            );
+                        }
+                        Err(e) => {
+                            // For other errors, log a warning but continue
+                            // This matches bubblewrap's behavior of continuing on remount errors
+                            log::warn!("Failed to remount submount {}: {}", submount.display(), e);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                // If we can't parse mountinfo, log a warning but don't fail the whole operation
+                log::warn!("Failed to parse submounts: {}", e);
+            }
         }
-
-        if !flags.contains(BindMountFlags::DEVICES) {
-            log::debug!("Applying nodev restriction");
-            remount_flags |= MsFlags::MS_NODEV;
-        }
-
-        log::debug!("Remounting with flags: {:?}", remount_flags);
-        mount(
-            None::<&str>,
-            dest,
-            None::<&str>,
-            remount_flags,
-            None::<&str>,
-        )
-        .wrap_err("Failed to apply remount flags")?;
-        log::debug!("Successfully applied remount flags");
     }
 
     log::debug!("Bind mount completed successfully");
