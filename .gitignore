@@ -1,0 +1,5 @@
+.bacon-locations
+tarpaulin-report.html
+target/
+.coverage
+.direnv
