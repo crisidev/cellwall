@@ -8,6 +8,7 @@ const LOOPBACK_IFNAME: &str = "lo";
 
 /// Set up loopback interface in the network namespace
 pub fn setup_loopback() -> Result<()> {
+    log::debug!("Setting up loopback interface");
     // Create a netlink socket
     let sock = socket(
         AddressFamily::Netlink,
@@ -16,9 +17,12 @@ pub fn setup_loopback() -> Result<()> {
         None,
     )
     .wrap_err("Failed to create netlink socket")?;
+    log::debug!("Created netlink socket");
 
     // Bring up the loopback interface
+    log::debug!("Bringing up interface: {}", LOOPBACK_IFNAME);
     bring_up_interface(sock.as_raw_fd(), LOOPBACK_IFNAME)?;
+    log::debug!("Loopback interface is up");
 
     Ok(())
 }
@@ -28,6 +32,8 @@ fn bring_up_interface(sock: RawFd, ifname: &str) -> Result<()> {
     use nix::libc::{IFF_UP, SIOCSIFFLAGS, ifreq};
     use std::ffi::CString;
     use std::mem;
+
+    log::debug!("Using ioctl SIOCSIFFLAGS to set IFF_UP on {}", ifname);
 
     // This is a simplified version - full implementation would use netlink
     // For now, we use ioctl to bring up the interface
@@ -46,10 +52,12 @@ fn bring_up_interface(sock: RawFd, ifname: &str) -> Result<()> {
         ifr.ifr_ifru.ifru_flags = IFF_UP as i16;
 
         // Use ioctl to set interface flags
+        log::debug!("Calling ioctl(SIOCSIFFLAGS) on socket {}", sock);
         let ret = nix::libc::ioctl(sock, SIOCSIFFLAGS, &ifr);
         if ret < 0 {
             eyre::bail!("Failed to bring up interface {}", ifname);
         }
+        log::debug!("ioctl succeeded, interface {} is now UP", ifname);
     }
 
     Ok(())

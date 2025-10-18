@@ -10,14 +10,23 @@ fn main() -> Result<()> {
     // Install color_eyre for beautiful error messages
     color_eyre::install()?;
 
-    // Initialize logging - respect RUST_LOG, default to warn
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
-
-    // Parse command-line arguments
+    // Parse command-line arguments early to get log level
     let args = Args::parse();
 
     // Validate arguments
     args.validate()?;
+
+    // Initialize logging - use --log-level if set, otherwise respect RUST_LOG
+    // If RUST_LOG is set, it takes precedence over --log-level
+    if std::env::var("RUST_LOG").is_err() {
+        env_logger::Builder::from_env(
+            env_logger::Env::default().default_filter_or(&args.log_level),
+        )
+        .init();
+    } else {
+        // RUST_LOG is set, use it and ignore --log-level
+        env_logger::Builder::from_env(env_logger::Env::default()).init();
+    }
 
     log::info!("Starting cellwrap sandbox");
     log::debug!("Real UID: {}, Real GID: {}", getuid(), getgid());

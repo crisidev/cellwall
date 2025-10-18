@@ -214,16 +214,21 @@ pub fn execute_setup_op(op: &SetupOp) -> Result<()> {
 fn setup_dev_filesystem<P: AsRef<Path>>(dest: P) -> Result<()> {
     let dest = dest.as_ref();
 
+    log::debug!("Setting up complete /dev filesystem at {}", dest.display());
+
     ensure_dir(dest, 0o755)?;
+    log::debug!("Mounting tmpfs for /dev");
     mount_tmpfs(dest, 0o755, None)?;
 
     // Create standard device nodes by bind-mounting from host
     let dev_nodes = ["null", "zero", "full", "random", "urandom", "tty"];
 
+    log::debug!("Creating device nodes: {:?}", dev_nodes);
     for node in &dev_nodes {
         let node_dest = dest.join(node);
         let node_src = PathBuf::from("/dev").join(node);
 
+        log::debug!("Bind mounting device node: /dev/{}", node);
         ensure_file(&node_dest, 0o644)?;
 
         bind_mount(
@@ -235,18 +240,22 @@ fn setup_dev_filesystem<P: AsRef<Path>>(dest: P) -> Result<()> {
 
     // Create /dev/pts for pseudo-terminals
     let pts_dir = dest.join("pts");
+    log::debug!("Creating /dev/pts for pseudo-terminals");
     ensure_dir(&pts_dir, 0o755)?;
     mount_devpts(&pts_dir)?;
 
     // Create /dev/ptmx symlink
     let ptmx = dest.join("ptmx");
+    log::debug!("Creating /dev/ptmx symlink");
     symlink("pts/ptmx", &ptmx)?;
 
     // Create /dev/shm
     let shm = dest.join("shm");
+    log::debug!("Creating /dev/shm directory");
     ensure_dir(&shm, 0o755)?;
 
     // Create standard fd symlinks
+    log::debug!("Creating standard fd symlinks (stdin, stdout, stderr, fd)");
     let stdin = dest.join("stdin");
     symlink("/proc/self/fd/0", &stdin)?;
 
@@ -259,6 +268,8 @@ fn setup_dev_filesystem<P: AsRef<Path>>(dest: P) -> Result<()> {
     // Create /dev/fd symlink
     let fd = dest.join("fd");
     symlink("/proc/self/fd", &fd)?;
+
+    log::debug!("/dev filesystem setup complete");
 
     Ok(())
 }

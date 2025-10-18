@@ -161,6 +161,10 @@ pub struct Args {
     #[arg(long, value_name = "FD")]
     pub seccomp: Option<i32>,
 
+    /// Set logging level (error, warn, info, debug, trace)
+    #[arg(long, value_name = "LEVEL", default_value = "warn")]
+    pub log_level: String,
+
     /// The command and arguments to run
     #[arg(trailing_var_arg = true, required = true)]
     pub command: Vec<String>,
@@ -200,6 +204,15 @@ impl Args {
 
         if !self.symlink.len().is_multiple_of(2) {
             eyre::bail!("--symlink requires pairs of source and destination");
+        }
+
+        // Validate log level
+        let valid_levels = ["error", "warn", "info", "debug", "trace"];
+        if !valid_levels.contains(&self.log_level.to_lowercase().as_str()) {
+            eyre::bail!(
+                "Invalid log level '{}'. Valid levels are: error, warn, info, debug, trace",
+                self.log_level
+            );
         }
 
         Ok(())

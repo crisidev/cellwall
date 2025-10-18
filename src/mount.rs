@@ -6,6 +6,7 @@ use std::path::Path;
 
 /// Mount proc filesystem
 pub fn mount_proc<P: AsRef<Path>>(target: P) -> Result<()> {
+    log::debug!("Mounting proc filesystem at {}", target.as_ref().display());
     mount(
         Some("proc"),
         target.as_ref(),
@@ -14,6 +15,7 @@ pub fn mount_proc<P: AsRef<Path>>(target: P) -> Result<()> {
         None::<&str>,
     )
     .wrap_err_with(|| format!("Failed to mount proc on {}", target.as_ref().display()))?;
+    log::debug!("Successfully mounted proc filesystem");
 
     Ok(())
 }
@@ -26,6 +28,11 @@ pub fn mount_tmpfs<P: AsRef<Path>>(target: P, mode: u32, size: Option<usize>) ->
         format!("mode={:o}", mode)
     };
 
+    log::debug!(
+        "Mounting tmpfs at {} with options: {}",
+        target.as_ref().display(),
+        options
+    );
     mount(
         Some("tmpfs"),
         target.as_ref(),
@@ -34,12 +41,14 @@ pub fn mount_tmpfs<P: AsRef<Path>>(target: P, mode: u32, size: Option<usize>) ->
         Some(options.as_str()),
     )
     .wrap_err_with(|| format!("Failed to mount tmpfs on {}", target.as_ref().display()))?;
+    log::debug!("Successfully mounted tmpfs");
 
     Ok(())
 }
 
 /// Mount devpts filesystem
 pub fn mount_devpts<P: AsRef<Path>>(target: P) -> Result<()> {
+    log::debug!("Mounting devpts at {}", target.as_ref().display());
     mount(
         Some("devpts"),
         target.as_ref(),
@@ -48,12 +57,14 @@ pub fn mount_devpts<P: AsRef<Path>>(target: P) -> Result<()> {
         Some("newinstance,ptmxmode=0666,mode=620"),
     )
     .wrap_err_with(|| format!("Failed to mount devpts on {}", target.as_ref().display()))?;
+    log::debug!("Successfully mounted devpts");
 
     Ok(())
 }
 
 /// Mount mqueue filesystem
 pub fn mount_mqueue<P: AsRef<Path>>(target: P) -> Result<()> {
+    log::debug!("Mounting mqueue at {}", target.as_ref().display());
     mount(
         Some("mqueue"),
         target.as_ref(),
@@ -62,12 +73,14 @@ pub fn mount_mqueue<P: AsRef<Path>>(target: P) -> Result<()> {
         None::<&str>,
     )
     .wrap_err_with(|| format!("Failed to mount mqueue on {}", target.as_ref().display()))?;
+    log::debug!("Successfully mounted mqueue");
 
     Ok(())
 }
 
 /// Remount filesystem as read-only
 pub fn remount_ro<P: AsRef<Path>>(target: P) -> Result<()> {
+    log::debug!("Remounting {} as read-only", target.as_ref().display());
     mount(
         None::<&str>,
         target.as_ref(),
@@ -81,12 +94,14 @@ pub fn remount_ro<P: AsRef<Path>>(target: P) -> Result<()> {
             target.as_ref().display()
         )
     })?;
+    log::debug!("Successfully remounted as read-only");
 
     Ok(())
 }
 
 /// Make mount point private (don't propagate mounts)
 pub fn make_private<P: AsRef<Path>>(target: P) -> Result<()> {
+    log::debug!("Making {} private", target.as_ref().display());
     mount(
         None::<&str>,
         target.as_ref(),
@@ -95,12 +110,14 @@ pub fn make_private<P: AsRef<Path>>(target: P) -> Result<()> {
         None::<&str>,
     )
     .wrap_err_with(|| format!("Failed to make {} private", target.as_ref().display()))?;
+    log::debug!("Successfully made mount private");
 
     Ok(())
 }
 
 /// Make mount point slave (receive but don't propagate)
 pub fn make_slave<P: AsRef<Path>>(target: P) -> Result<()> {
+    log::debug!("Making {} slave", target.as_ref().display());
     mount(
         None::<&str>,
         target.as_ref(),
@@ -109,6 +126,7 @@ pub fn make_slave<P: AsRef<Path>>(target: P) -> Result<()> {
         None::<&str>,
     )
     .wrap_err_with(|| format!("Failed to make {} slave", target.as_ref().display()))?;
+    log::debug!("Successfully made mount slave");
 
     Ok(())
 }
