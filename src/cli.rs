@@ -105,6 +105,14 @@ pub struct Args {
     #[arg(long, value_names = ["SOURCE", "DEST"], num_args = 2)]
     pub dev_bind_try: Vec<String>,
 
+    /// Bind mount from file descriptor FD to DEST
+    #[arg(long, value_names = ["FD", "DEST"], num_args = 2)]
+    pub bind_fd: Vec<String>,
+
+    /// Bind mount from file descriptor FD to DEST (read-only)
+    #[arg(long, value_names = ["FD", "DEST"], num_args = 2)]
+    pub ro_bind_fd: Vec<String>,
+
     /// Change permissions of PATH (must already exist)
     #[arg(long, value_names = ["OCTAL", "PATH"], num_args = 2)]
     pub chmod: Vec<String>,
@@ -200,6 +208,14 @@ impl Args {
 
         if !self.symlink.len().is_multiple_of(2) {
             eyre::bail!("--symlink requires pairs of source and destination");
+        }
+
+        if !self.bind_fd.len().is_multiple_of(2) {
+            eyre::bail!("--bind-fd requires pairs of fd and destination");
+        }
+
+        if !self.ro_bind_fd.len().is_multiple_of(2) {
+            eyre::bail!("--ro-bind-fd requires pairs of fd and destination");
         }
 
         // Validate log level

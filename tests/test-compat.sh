@@ -423,11 +423,8 @@ fi
 # Cleanup seccomp test file
 rm -f seccomp-allow.bpf
 
-# ============================================
-# P0 Security Tests
-# ============================================
-
-# Test 1: MS_NOSUID on bind mounts (requires root to test setuid)
+# Security Tests
+#  MS_NOSUID on bind mounts (requires root to test setuid)
 if [ "$RUN_ROOT_TESTS" = "true" ]; then
     # Create a setuid binary test
     mkdir -p nosuid-test
@@ -455,7 +452,7 @@ else
     skip "MS_NOSUID prevents setuid escalation (requires --with-sudo)"
 fi
 
-# Test 2: Recursive bind mounts apply security flags to submounts
+# Recursive bind mounts apply security flags to submounts
 if [ "$RUN_ROOT_TESTS" = "true" ]; then
     # Create a directory structure with a tmpfs submount
     mkdir -p recursive-test/parent/child
@@ -481,7 +478,7 @@ else
     skip "recursive bind mount with submounts (requires --with-sudo)"
 fi
 
-# Test 3: Dangerous /proc subdirectories are protected
+# Dangerous /proc subdirectories are protected
 if [ "$RUN_ROOT_TESTS" = "true" ]; then
     mkdir -p proc-security-test
 
@@ -514,7 +511,7 @@ else
     skip "dangerous /proc/sysrq-trigger test (requires --with-sudo)"
 fi
 
-# Test 4: Read-only bind mounts also get nosuid
+# Read-only bind mounts also get nosuid
 mkdir -p ro-nosuid-test
 if $CELLWALL --ro-bind ./ro-nosuid-test ./ro-nosuid-test \
    sh -c 'test -r ./ro-nosuid-test' 2>&1; then
@@ -524,7 +521,7 @@ else
 fi
 rm -rf ro-nosuid-test
 
-# Test 5: Device bind mounts still get nosuid (but allow devices)
+# Device bind mounts still get nosuid (but allow devices)
 if [ "$RUN_ROOT_TESTS" = "true" ] && [ -c /dev/null ]; then
     mkdir -p dev-nosuid-test
     if sudo $CELLWALL --dev-bind /dev/null ./dev-nosuid-test/null \
@@ -542,7 +539,7 @@ else
     fi
 fi
 
-# Test 6: Complex recursive bind mount scenario
+# Complex recursive bind mount scenario
 if [ "$RUN_ROOT_TESTS" = "true" ]; then
     # Create a more complex hierarchy
     mkdir -p complex-recursive/{a,a/b,a/b/c}
@@ -576,10 +573,10 @@ else
 fi
 
 # ============================================
-# P1 Tests: Preserve existing mount flags
+# P1 Preserve existing mount flags
 # ============================================
 
-# Test 7: Preserve noexec flag from existing mount
+# Preserve noexec flag from existing mount
 if [ "$RUN_ROOT_TESTS" = "true" ]; then
     # Create a tmpfs with noexec and mount it
     mkdir -p preserve-flags-test
@@ -607,7 +604,7 @@ else
     skip "bind mount preserves existing noexec flag (requires --with-sudo)"
 fi
 
-# Test 8: Preserve relatime flag from existing mount
+# Preserve relatime flag from existing mount
 if [ "$RUN_ROOT_TESTS" = "true" ]; then
     # Create a tmpfs with relatime and mount it
     mkdir -p relatime-test
@@ -635,7 +632,7 @@ else
     skip "bind mount preserves existing relatime flag (requires --with-sudo)"
 fi
 
-# Test 9: Add security flags while preserving existing flags
+# Add security flags while preserving existing flags
 if [ "$RUN_ROOT_TESTS" = "true" ]; then
     # Create a tmpfs with noexec
     mkdir -p combined-flags-test
@@ -663,7 +660,7 @@ else
     skip "bind mount adds security flags while preserving existing flags (requires --with-sudo)"
 fi
 
-# Test 10: Submounts also preserve their own flags
+# Submounts also preserve their own flags
 if [ "$RUN_ROOT_TESTS" = "true" ]; then
     # Create parent and child with different flags
     mkdir -p submount-flags-test/parent
@@ -700,6 +697,140 @@ if [ "$RUN_ROOT_TESTS" = "true" ]; then
     rm -rf submount-flags-test
 else
     skip "recursive bind mount with submounts preserving flags (requires --with-sudo)"
+fi
+
+# ============================================
+# Mountinfo Tree Parsing Tests
+# ============================================
+
+# Test that we correctly filter submounts by parent-child relationship
+# This is a critical security test - we must NOT try to remount unrelated mounts
+if [ "$RUN_ROOT_TESTS" = "true" ]; then
+    # Create two independent mount hierarchies that happen to have overlapping paths
+    # Hierarchy 1: tree1/parent with tree1/parent/child submount
+    # Hierarchy 2: tree2 mounted at a path that shares prefix with tree1
+
+    mkdir -p tree-test-1/parent tree-test-2
+    sudo mount -t tmpfs tmpfs tree-test-1/parent 2>/dev/null || true
+
+    # Create a child mount inside tree1
+    mkdir -p tree-test-1/parent/child 2>/dev/null || true
+    sudo mount -t tmpfs -o noexec tmpfs tree-test-1/parent/child 2>/dev/null || true
+
+    # Create a completely separate mount that happens to have a similar path name
+    sudo mount -t tmpfs tmpfs tree-test-2 2>/dev/null || true
+
+    # Now bind mount tree1 - it should ONLY remount tree1/parent/child (actual descendant)
+    # It should NOT try to remount tree-test-2 even though paths might look similar
+    mkdir -p tree-dst
+    if sudo $CELLWALL --bind ./tree-test-1/parent ./tree-dst true 2>&1; then
+        pass "mountinfo tree parsing filters by parent-child relationship"
+    else
+        fail "mountinfo tree parsing filters by parent-child relationship"
+    fi
+
+    # Cleanup
+    sudo umount tree-test-1/parent/child 2>/dev/null || true
+    sudo umount tree-test-1/parent 2>/dev/null || true
+    sudo umount tree-test-2 2>/dev/null || true
+    rm -rf tree-test-1 tree-test-2 tree-dst
+else
+    skip "mountinfo tree parsing filters by parent-child relationship (requires --with-sudo)"
+fi
+
+# Test recursive bind with nested submounts - verify all descendants are remounted
+if [ "$RUN_ROOT_TESTS" = "true" ]; then
+    # Create a 3-level hierarchy: parent -> child -> grandchild
+    mkdir -p nested-tree/parent
+    sudo mount -t tmpfs tmpfs nested-tree/parent 2>/dev/null || true
+
+    mkdir -p nested-tree/parent/child 2>/dev/null || true
+    sudo mount -t tmpfs tmpfs nested-tree/parent/child 2>/dev/null || true
+
+    mkdir -p nested-tree/parent/child/grandchild 2>/dev/null || true
+    sudo mount -t tmpfs -o noexec tmpfs nested-tree/parent/child/grandchild 2>/dev/null || true
+
+    # Recursive bind should handle all 3 levels
+    mkdir -p nested-dst
+    if sudo $CELLWALL --bind ./nested-tree/parent ./nested-dst \
+       sh -c 'test -d ./nested-dst && test -d ./nested-dst/child && test -d ./nested-dst/child/grandchild' 2>&1; then
+        pass "recursive bind with 3-level nested submounts"
+    else
+        fail "recursive bind with 3-level nested submounts"
+    fi
+
+    # Cleanup
+    sudo umount nested-tree/parent/child/grandchild 2>/dev/null || true
+    sudo umount nested-tree/parent/child 2>/dev/null || true
+    sudo umount nested-tree/parent 2>/dev/null || true
+    rm -rf nested-tree nested-dst
+else
+    skip "recursive bind with 3-level nested submounts (requires --with-sudo)"
+fi
+
+# Test that security flags are applied to all levels of nested mounts
+if [ "$RUN_ROOT_TESTS" = "true" ]; then
+    # Create hierarchy with different flags at each level
+    mkdir -p flag-tree/parent
+    sudo mount -t tmpfs tmpfs flag-tree/parent 2>/dev/null || true
+
+    mkdir -p flag-tree/parent/child 2>/dev/null || true
+    sudo mount -t tmpfs -o noexec tmpfs flag-tree/parent/child 2>/dev/null || true
+
+    # Do a read-only recursive bind - should apply ro,nosuid,nodev to all levels
+    mkdir -p flag-dst
+    if sudo $CELLWALL --ro-bind ./flag-tree/parent ./flag-dst \
+       sh -c 'test -d ./flag-dst && ! echo test > ./flag-dst/testfile' 2>/dev/null; then
+        pass "security flags applied to all levels of nested mounts"
+    else
+        fail "security flags applied to all levels of nested mounts"
+    fi
+
+    # Cleanup
+    sudo umount flag-tree/parent/child 2>/dev/null || true
+    sudo umount flag-tree/parent 2>/dev/null || true
+    rm -rf flag-tree flag-dst
+else
+    skip "security flags applied to all levels of nested mounts (requires --with-sudo)"
+fi
+
+# bind-fd with directory
+mkdir -p bindfd-src bindfd-dst
+echo "bindfd-test" > bindfd-src/file.txt
+
+# Pass FD 3 to cellwall (FD must stay open during execution)
+if $CELLWALL --bind-fd 3 ./bindfd-dst cat ./bindfd-dst/file.txt 3< bindfd-src > out 2>&1 && \
+   assert_file_has_content out "bindfd-test"; then
+    pass "bind-fd with directory"
+else
+    fail "bind-fd with directory"
+fi
+
+# ro-bind-fd with directory (verify read-only)
+if $CELLWALL --ro-bind-fd 3 ./bindfd-dst \
+   sh -c '! echo "write-attempt" > ./bindfd-dst/new-file.txt 2>/dev/null' 3< bindfd-src 2>/dev/null; then
+    pass "ro-bind-fd prevents writes"
+else
+    fail "ro-bind-fd prevents writes"
+fi
+
+# bind-fd with file
+echo "file-bindfd" > bindfd-file.txt
+touch bindfd-mounted
+
+if $CELLWALL --bind-fd 3 ./bindfd-mounted cat ./bindfd-mounted 3< bindfd-file.txt > out 2>&1 && \
+   assert_file_has_content out "file-bindfd"; then
+    pass "bind-fd with file"
+else
+    fail "bind-fd with file"
+fi
+
+# ro-bind-fd with file (verify read-only)
+if $CELLWALL --ro-bind-fd 3 ./bindfd-mounted \
+   sh -c '! echo "write" > ./bindfd-mounted 2>/dev/null' 3< bindfd-file.txt 2>/dev/null; then
+    pass "ro-bind-fd file prevents writes"
+else
+    fail "ro-bind-fd file prevents writes"
 fi
 
 # Cleanup

@@ -56,6 +56,11 @@ pub enum SetupOp {
         devices: bool,
         recursive: bool,
     },
+    BindMountFd {
+        fd: i32,
+        dest: PathBuf,
+        readonly: bool,
+    },
 }
 
 /// Execute a setup operation
@@ -204,6 +209,68 @@ pub fn execute_setup_op(op: &SetupOp) -> Result<()> {
             }
 
             bind_mount(source, dest, flags)?;
+        }
+
+        SetupOp::BindMountFd { fd, dest, readonly } => {
+            log::debug!("Bind mounting from FD {} to {}", fd, dest.display());
+
+            // Construct path to /proc/self/fd/<fd> and resolve it to the actual path
+            let fd_path = format!("/proc/self/fd/{}", fd);
+
+            // Resolve the symlink to get the actual path
+            // This is necessary because bind mount doesn't work with /proc/self/fd symlinks
+            let source = std::fs::read_link(&fd_path)
+                .map_err(|e| eyre::eyre!("Failed to resolve FD {}: {}", fd, e))?;
+
+            log::debug!("FD {} resolves to: {}", fd, source.display());
+
+            // Get stat info from the FD before mounting
+            // This is used to detect race conditions after the mount
+            // We use the original fd_path for fstat to avoid TOCTOU issues
+            let fd_stat = {
+                use std::os::unix::fs::MetadataExt;
+                let metadata = std::fs::metadata(&fd_path)
+                    .map_err(|e| eyre::eyre!("Failed to stat FD {}: {}", fd, e))?;
+                (metadata.dev(), metadata.ino())
+            };
+
+            // Ensure parent directories exist
+            create_parent_dirs(dest, 0o755)?;
+
+            // Create the destination if it doesn't exist
+            if !dest.exists() {
+                if source.is_dir() {
+                    ensure_dir(dest, 0o755)?;
+                } else {
+                    ensure_file(dest, 0o644)?;
+                }
+            }
+
+            let mut flags = BindMountFlags::RECURSIVE;
+            if *readonly {
+                flags |= BindMountFlags::READONLY;
+            }
+
+            bind_mount(&source, dest, flags)?;
+
+            // Verify that what we mounted is what we intended (race condition detection)
+            // This matches bubblewrap's implementation - see bubblewrap.c lines 1266-1273
+            let mount_stat = {
+                use std::os::unix::fs::MetadataExt;
+                let metadata = std::fs::metadata(dest).map_err(|e| {
+                    eyre::eyre!("Failed to stat mount at {}: {}", dest.display(), e)
+                })?;
+                (metadata.dev(), metadata.ino())
+            };
+
+            if fd_stat != mount_stat {
+                eyre::bail!(
+                    "Race condition detected: FD {} changed between stat and mount",
+                    fd
+                );
+            }
+
+            log::debug!("FD-based bind mount successful and verified");
         }
     }
 

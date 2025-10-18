@@ -48,16 +48,14 @@ fn parse_mount_options(options: &str) -> MsFlags {
 /// Get the current mount flags for a given mount point from /proc/self/mountinfo
 /// Returns None if the mount point is not found
 fn get_mount_flags(mount_point: &Path) -> Result<Option<MsFlags>> {
-    log::debug!(
-        "Looking up mount flags for {}",
-        mount_point.display()
-    );
+    log::debug!("Looking up mount flags for {}", mount_point.display());
 
     let mountinfo = fs::read_to_string("/proc/self/mountinfo")
         .context("Failed to read /proc/self/mountinfo")?;
 
     // Canonicalize the mount point to match what's in mountinfo
-    let canonical = mount_point.canonicalize()
+    let canonical = mount_point
+        .canonicalize()
         .context("Failed to canonicalize mount point")?;
 
     for line in mountinfo.lines() {
@@ -91,9 +89,19 @@ fn get_mount_flags(mount_point: &Path) -> Result<Option<MsFlags>> {
     Ok(None)
 }
 
+/// Mount info line parsed from /proc/self/mountinfo
+#[derive(Debug, Clone)]
+struct MountInfoLine {
+    id: i32,
+    parent_id: i32,
+    mountpoint: PathBuf,
+    options: MsFlags,
+}
+
 /// Parse /proc/self/mountinfo to find all submounts under a given path
-/// Returns a list of mount points that are children of the root_mount path
-fn parse_submounts(root_mount: &Path) -> Result<Vec<PathBuf>> {
+/// Returns a list of (mount_point, options) tuples for children of the root_mount path
+/// This matches bubblewrap's parse_mountinfo function behavior by building a parent-child tree
+fn parse_submounts(root_mount: &Path) -> Result<Vec<(PathBuf, MsFlags)>> {
     log::debug!(
         "Parsing /proc/self/mountinfo for submounts under {}",
         root_mount.display()
@@ -102,27 +110,114 @@ fn parse_submounts(root_mount: &Path) -> Result<Vec<PathBuf>> {
     let mountinfo = fs::read_to_string("/proc/self/mountinfo")
         .context("Failed to read /proc/self/mountinfo")?;
 
-    let mut submounts = Vec::new();
+    // Parse all mount info lines
+    let mut lines = Vec::new();
+    let mut root_idx: Option<usize> = None;
 
     for line in mountinfo.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 5 {
+        if parts.len() < 6 {
             continue;
         }
 
-        // Format: mount_id parent_id major:minor root mount_point options...
-        // We want the mount_point (index 4)
+        // Format: mount_id parent_id major:minor root mount_point options ...
+        let mount_id = parts[0]
+            .parse::<i32>()
+            .context("Failed to parse mount_id")?;
+        let parent_id = parts[1]
+            .parse::<i32>()
+            .context("Failed to parse parent_id")?;
         let mount_point = PathBuf::from(parts[4]);
+        let options = parse_mount_options(parts[5]);
 
-        // Check if this mount point is under our root_mount
-        // and not equal to root_mount (we only want submounts)
-        if mount_point.starts_with(root_mount) && mount_point != root_mount {
-            log::debug!("Found submount: {}", mount_point.display());
-            submounts.push(mount_point);
+        // Find the root mount (the one we just created)
+        if mount_point == root_mount {
+            root_idx = Some(lines.len());
+        }
+
+        lines.push(MountInfoLine {
+            id: mount_id,
+            parent_id,
+            mountpoint: mount_point,
+            options,
+        });
+    }
+
+    // If we didn't find the root mount, return empty
+    let root_idx = match root_idx {
+        Some(idx) => idx,
+        None => {
+            log::debug!("Root mount {} not found in mountinfo", root_mount.display());
+            return Ok(Vec::new());
+        }
+    };
+
+    let root_id = lines[root_idx].id;
+    log::debug!(
+        "Found root mount at index {} with mount_id {}",
+        root_idx,
+        root_id
+    );
+
+    // Build a map of mount_id -> line for quick lookup
+    let by_id: std::collections::HashMap<i32, &MountInfoLine> =
+        lines.iter().map(|line| (line.id, line)).collect();
+
+    // Collect all mounts that are descendants of the root mount
+    // A mount is a descendant if following parent_id links eventually leads to root_id
+    let mut submounts = Vec::new();
+
+    for line in &lines {
+        // Skip the root mount itself
+        if line.id == root_id {
+            continue;
+        }
+
+        // Check if this mount point is under our root_mount path
+        if !line.mountpoint.starts_with(root_mount) {
+            continue;
+        }
+
+        // Check if this mount is a descendant of root by following parent links
+        let mut current_id = line.parent_id;
+        let mut is_descendant = false;
+
+        // Walk up the parent chain
+        while let Some(parent) = by_id.get(&current_id) {
+            if parent.id == root_id {
+                is_descendant = true;
+                break;
+            }
+            current_id = parent.parent_id;
+
+            // Prevent infinite loops (shouldn't happen in valid mountinfo)
+            if current_id == parent.id {
+                break;
+            }
+        }
+
+        if is_descendant {
+            log::debug!(
+                "Found submount: {} (mount_id={}, parent_id={}) with flags: {:?}",
+                line.mountpoint.display(),
+                line.id,
+                line.parent_id,
+                line.options
+            );
+            submounts.push((line.mountpoint.clone(), line.options));
+        } else {
+            log::debug!(
+                "Skipping mount {} (not a descendant of root mount_id={})",
+                line.mountpoint.display(),
+                root_id
+            );
         }
     }
 
-    log::debug!("Found {} submounts", submounts.len());
+    log::debug!(
+        "Found {} submounts that are descendants of root",
+        submounts.len()
+    );
     Ok(submounts)
 }
 
@@ -229,64 +324,105 @@ pub fn bind_mount<P: AsRef<Path>, Q: AsRef<Path>>(
     // Apply flags to all submounts when using recursive bind mounts
     // This is necessary because bind mounts don't automatically apply flags to submounts
     // See bubblewrap bind-mount.c lines 461-486
+    //
+    // The key insight from bubblewrap:
+    // 1. Use realpath() on the destination AFTER the mount to resolve symlinks
+    // 2. Parse mountinfo using the resolved destination path
+    // 3. Remount submounts using the exact paths from mountinfo
     if flags.contains(BindMountFlags::RECURSIVE) {
         log::debug!("Applying flags to submounts (recursive bind mount)");
 
-        // Resolve the destination path to handle symlinks
+        // Resolve the destination path after the mount operation
+        // This matches bubblewrap's realpath(dest) call at line 404
         let resolved_dest = dest
             .canonicalize()
-            .wrap_err_with(|| format!("Failed to canonicalize destination {}", dest.display()))?;
+            .wrap_err_with(|| format!("Failed to resolve destination: {}", dest.display()))?;
 
+        log::debug!(
+            "Resolved destination: {} -> {}",
+            dest.display(),
+            resolved_dest.display()
+        );
+
+        // Parse submounts under the resolved destination
+        // This gives us the exact paths as they appear in /proc/self/mountinfo
         match parse_submounts(&resolved_dest) {
             Ok(submounts) => {
-                for submount in submounts {
-                    log::debug!("Remounting submount: {}", submount.display());
+                for (submount_path, existing_flags) in submounts {
+                    log::debug!(
+                        "Remounting submount: {} (existing flags: {:?})",
+                        submount_path.display(),
+                        existing_flags
+                    );
 
-                    // Get existing flags for this submount
-                    let submount_existing_flags = match get_mount_flags(&submount) {
-                        Ok(Some(flags)) => {
-                            log::debug!("Preserving existing flags for submount: {:?}", flags);
-                            flags
-                        }
-                        Ok(None) | Err(_) => MsFlags::empty(),
-                    };
+                    // Check if the submount path actually exists in the current namespace
+                    // If it doesn't exist, it's likely from a different mount namespace
+                    if !submount_path.exists() {
+                        log::debug!(
+                            "Skipping submount {} (doesn't exist in current namespace)",
+                            submount_path.display()
+                        );
+                        continue;
+                    }
 
-                    // Build flags for submount (same logic as main mount)
-                    let mut submount_flags = MsFlags::MS_BIND | MsFlags::MS_REMOUNT | submount_existing_flags;
-                    submount_flags |= MsFlags::MS_NOSUID;
+                    // Build new flags by OR'ing existing flags with security requirements
+                    // This matches bubblewrap's logic at lines 469-470
+                    let mut new_flags = MsFlags::MS_BIND | MsFlags::MS_REMOUNT | existing_flags;
+                    new_flags |= MsFlags::MS_NOSUID;
 
                     if flags.contains(BindMountFlags::READONLY) {
-                        submount_flags |= MsFlags::MS_RDONLY;
+                        new_flags |= MsFlags::MS_RDONLY;
                     }
 
                     if !flags.contains(BindMountFlags::DEVICES) {
-                        submount_flags |= MsFlags::MS_NODEV;
+                        new_flags |= MsFlags::MS_NODEV;
                     }
 
-                    // Try to remount with the same flags
-                    // If we get EACCES (permission denied), that's OK - it means the user
-                    // can't access it anyway, so it doesn't need extra protection
-                    match mount(
-                        None::<&str>,
-                        &submount,
-                        None::<&str>,
-                        submount_flags,
-                        None::<&str>,
-                    ) {
-                        Ok(_) => {
-                            log::debug!("Successfully remounted submount: {}", submount.display());
+                    // Only remount if flags have changed
+                    if new_flags != existing_flags {
+                        // Try to remount with the new flags
+                        // Use the exact path from mountinfo (bubblewrap line 472)
+                        match mount(
+                            None::<&str>,
+                            &submount_path,
+                            None::<&str>,
+                            new_flags,
+                            None::<&str>,
+                        ) {
+                            Ok(_) => {
+                                log::debug!(
+                                    "Successfully remounted submount: {}",
+                                    submount_path.display()
+                                );
+                            }
+                            Err(nix::errno::Errno::EACCES) => {
+                                // If we can't read the mountpoint, we can't remount it,
+                                // but that's safe to ignore because the user can't access it anyway.
+                                // This matches bubblewrap's behavior at lines 475-477
+                                log::debug!(
+                                    "Ignoring EACCES for submount {} (user can't access it anyway)",
+                                    submount_path.display()
+                                );
+                            }
+                            Err(e) => {
+                                // For other errors (including EINVAL, ENOENT), this is a real problem
+                                // Now that we properly filter mounts by parent-child relationships,
+                                // we should only be trying to remount mounts that are actually part
+                                // of our recursive bind mount tree.
+                                // Bubblewrap would return an error here (line 254), but we'll log a
+                                // warning and continue to be more resilient.
+                                log::warn!(
+                                    "Failed to remount submount {}: {}",
+                                    submount_path.display(),
+                                    e
+                                );
+                            }
                         }
-                        Err(nix::errno::Errno::EACCES) => {
-                            log::debug!(
-                                "Ignoring EACCES for submount {} (user can't access it anyway)",
-                                submount.display()
-                            );
-                        }
-                        Err(e) => {
-                            // For other errors, log a warning but continue
-                            // This matches bubblewrap's behavior of continuing on remount errors
-                            log::warn!("Failed to remount submount {}: {}", submount.display(), e);
-                        }
+                    } else {
+                        log::debug!(
+                            "Submount {} already has correct flags, skipping remount",
+                            submount_path.display()
+                        );
                     }
                 }
             }

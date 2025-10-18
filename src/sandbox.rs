@@ -173,6 +173,40 @@ impl SandboxConfig {
             }
         }
 
+        // Parse bind-fd mounts
+        for chunk in args.bind_fd.chunks(2) {
+            if let [fd_str, dest] = chunk {
+                let fd = fd_str
+                    .parse::<i32>()
+                    .wrap_err_with(|| format!("Invalid file descriptor: {}", fd_str))?;
+                if fd < 0 {
+                    eyre::bail!("File descriptor must be non-negative: {}", fd);
+                }
+                setup_ops.push(SetupOp::BindMountFd {
+                    fd,
+                    dest: PathBuf::from(dest),
+                    readonly: false,
+                });
+            }
+        }
+
+        // Parse ro-bind-fd mounts
+        for chunk in args.ro_bind_fd.chunks(2) {
+            if let [fd_str, dest] = chunk {
+                let fd = fd_str
+                    .parse::<i32>()
+                    .wrap_err_with(|| format!("Invalid file descriptor: {}", fd_str))?;
+                if fd < 0 {
+                    eyre::bail!("File descriptor must be non-negative: {}", fd);
+                }
+                setup_ops.push(SetupOp::BindMountFd {
+                    fd,
+                    dest: PathBuf::from(dest),
+                    readonly: true,
+                });
+            }
+        }
+
         let mut unshare_user = args.unshare_user;
         let mut unshare_pid = args.unshare_pid;
         let mut unshare_net = args.unshare_net;
@@ -683,6 +717,8 @@ mod tests {
             ro_bind_try: vec![],
             dev_bind: vec![],
             dev_bind_try: vec![],
+            bind_fd: vec![],
+            ro_bind_fd: vec![],
             chmod: vec![],
             proc: vec![],
             dev: vec![],
