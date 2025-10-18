@@ -119,9 +119,17 @@ fi
 
 if $CELLWALL --ro-bind ./bind-src ./bind-dst cat ./bind-dst/file.txt > out 2>&1 && \
    assert_file_has_content out "test-data"; then
-    pass "read-only bind mount"
+    pass "read-only bind mount (read)"
 else
-    fail "read-only bind mount"
+    fail "read-only bind mount (read)"
+fi
+
+# Test that ro-bind actually prevents writes
+if $CELLWALL --ro-bind ./bind-src ./bind-dst \
+   sh -c '! echo "write-attempt" > ./bind-dst/file.txt 2>/dev/null' 2>/dev/null; then
+    pass "read-only bind mount (write protection)"
+else
+    fail "read-only bind mount (write protection)"
 fi
 
 # File bind mounts

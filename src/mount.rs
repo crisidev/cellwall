@@ -148,14 +148,221 @@ pub fn unmount<P: AsRef<Path>>(target: P, detach: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
-    fn test_tmpfs_options() {
-        // Just test option string formatting
-        let with_size = format!("mode={:o},size={}", 0o755, 1024);
-        assert_eq!(with_size, "mode=755,size=1024");
-
+    fn test_tmpfs_options_formatting() {
+        // Test option string formatting without size
         let without_size = format!("mode={:o}", 0o755);
         assert_eq!(without_size, "mode=755");
+
+        // Test with size
+        let with_size = format!("mode={:o},size={}", 0o755, 1024);
+        assert_eq!(with_size, "mode=755,size=1024");
+    }
+
+    #[test]
+    fn test_tmpfs_options_various_modes() {
+        // Test different permission modes
+        let options_755 = format!("mode={:o}", 0o755);
+        assert_eq!(options_755, "mode=755");
+
+        let options_1777 = format!("mode={:o}", 0o1777);
+        assert_eq!(options_1777, "mode=1777");
+
+        let options_644 = format!("mode={:o}", 0o644);
+        assert_eq!(options_644, "mode=644");
+    }
+
+    #[test]
+    fn test_tmpfs_options_with_various_sizes() {
+        // Test size formatting
+        let kb = format!("mode={:o},size={}", 0o755, 1024);
+        assert_eq!(kb, "mode=755,size=1024");
+
+        let mb = format!("mode={:o},size={}", 0o755, 1024 * 1024);
+        assert_eq!(mb, "mode=755,size=1048576");
+
+        let gb = format!("mode={:o},size={}", 0o755, 1024 * 1024 * 1024);
+        assert_eq!(gb, "mode=755,size=1073741824");
+    }
+
+    #[test]
+    fn test_mount_proc_nonexistent_target() {
+        // Mounting to nonexistent directory should fail
+        let result = mount_proc("/nonexistent/proc/mount/point");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_mount_proc_needs_privileges() {
+        // Mounting proc without privileges should fail (unless we're root)
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("proc");
+        std::fs::create_dir(&target).unwrap();
+
+        let result = mount_proc(&target);
+        // Will fail with EPERM unless running as root
+        if nix::unistd::getuid().as_raw() != 0 {
+            assert!(result.is_err());
+            let err_msg = result.unwrap_err().to_string();
+            assert!(
+                err_msg.contains("Operation not permitted") || err_msg.contains("Failed to mount")
+            );
+        }
+    }
+
+    #[test]
+    fn test_mount_tmpfs_nonexistent_target() {
+        // Mounting to nonexistent directory should fail
+        let result = mount_tmpfs("/nonexistent/tmpfs/mount/point", 0o755, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_mount_tmpfs_needs_privileges() {
+        // Mounting tmpfs without privileges should fail (unless we're root)
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("tmpfs");
+        std::fs::create_dir(&target).unwrap();
+
+        let result = mount_tmpfs(&target, 0o755, None);
+        // Will fail with EPERM unless running as root
+        if nix::unistd::getuid().as_raw() != 0 {
+            assert!(result.is_err());
+            let err_msg = result.unwrap_err().to_string();
+            assert!(
+                err_msg.contains("Operation not permitted") || err_msg.contains("Failed to mount")
+            );
+        }
+    }
+
+    #[test]
+    fn test_mount_tmpfs_with_size() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("tmpfs");
+        std::fs::create_dir(&target).unwrap();
+
+        let result = mount_tmpfs(&target, 0o1777, Some(1024 * 1024));
+        // Will fail with EPERM unless running as root
+        if nix::unistd::getuid().as_raw() != 0 {
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn test_mount_devpts_nonexistent_target() {
+        let result = mount_devpts("/nonexistent/devpts/mount/point");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_mount_devpts_needs_privileges() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("pts");
+        std::fs::create_dir(&target).unwrap();
+
+        let result = mount_devpts(&target);
+        if nix::unistd::getuid().as_raw() != 0 {
+            assert!(result.is_err());
+            let err_msg = result.unwrap_err().to_string();
+            assert!(
+                err_msg.contains("Operation not permitted") || err_msg.contains("Failed to mount")
+            );
+        }
+    }
+
+    #[test]
+    fn test_mount_mqueue_nonexistent_target() {
+        let result = mount_mqueue("/nonexistent/mqueue/mount/point");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_mount_mqueue_needs_privileges() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("mqueue");
+        std::fs::create_dir(&target).unwrap();
+
+        let result = mount_mqueue(&target);
+        if nix::unistd::getuid().as_raw() != 0 {
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn test_remount_ro_nonexistent_target() {
+        let result = remount_ro("/nonexistent/mount/point");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_remount_ro_not_mounted() {
+        // Trying to remount a directory that isn't a mount point should fail
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("notmounted");
+        std::fs::create_dir(&target).unwrap();
+
+        let result = remount_ro(&target);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_make_private_nonexistent_target() {
+        let result = make_private("/nonexistent/mount/point");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_make_private_not_mounted() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("notmounted");
+        std::fs::create_dir(&target).unwrap();
+
+        let result = make_private(&target);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_make_slave_nonexistent_target() {
+        let result = make_slave("/nonexistent/mount/point");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_make_slave_not_mounted() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("notmounted");
+        std::fs::create_dir(&target).unwrap();
+
+        let result = make_slave(&target);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_unmount_nonexistent_target() {
+        let result = unmount("/nonexistent/mount/point", false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_unmount_not_mounted() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("notmounted");
+        std::fs::create_dir(&target).unwrap();
+
+        let result = unmount(&target, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_unmount_with_detach_flag() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("notmounted");
+        std::fs::create_dir(&target).unwrap();
+
+        // Even with detach flag, unmounting non-mounted directory should fail
+        let result = unmount(&target, true);
+        assert!(result.is_err());
     }
 }

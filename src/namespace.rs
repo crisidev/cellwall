@@ -128,21 +128,3 @@ pub fn user_namespaces_available() -> bool {
 pub fn cgroup_namespaces_available() -> bool {
     stat("/proc/self/ns/cgroup").is_ok()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_namespace_info() {
-        let ns = NamespaceInfo::new("user");
-        assert_eq!(ns.name, "user");
-        assert_eq!(ns.id, None);
-    }
-
-    #[test]
-    fn test_user_namespaces_check() {
-        // This will depend on the system
-        let _ = user_namespaces_available();
-    }
-}

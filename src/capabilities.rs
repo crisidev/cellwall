@@ -266,9 +266,123 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_has_caps() -> Result<()> {
-        // This test will vary depending on whether we're running as root
-        let _ = has_caps()?;
+    fn test_parse_capability_basic() -> Result<()> {
+        let cap = parse_capability("NET_ADMIN")?;
+        assert_eq!(cap, caps::Capability::CAP_NET_ADMIN);
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_capability_with_prefix() -> Result<()> {
+        let cap = parse_capability("CAP_NET_ADMIN")?;
+        assert_eq!(cap, caps::Capability::CAP_NET_ADMIN);
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_capability_case_insensitive() -> Result<()> {
+        assert_eq!(
+            parse_capability("net_admin")?,
+            caps::Capability::CAP_NET_ADMIN
+        );
+        assert_eq!(
+            parse_capability("Net_Admin")?,
+            caps::Capability::CAP_NET_ADMIN
+        );
+        assert_eq!(
+            parse_capability("NET_ADMIN")?,
+            caps::Capability::CAP_NET_ADMIN
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_capability_whitespace() -> Result<()> {
+        let cap = parse_capability("  NET_ADMIN  ")?;
+        assert_eq!(cap, caps::Capability::CAP_NET_ADMIN);
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_capability_invalid() {
+        let result = parse_capability("INVALID_CAP_NAME");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Unknown capability")
+        );
+    }
+
+    #[test]
+    fn test_parse_capability_rejects_cap_all() {
+        let result = parse_capability("ALL");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("CAP_ALL"));
+    }
+
+    #[test]
+    fn test_parse_capability_rejects_cap_all_with_prefix() {
+        let result = parse_capability("CAP_ALL");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_all_documented_capabilities() -> Result<()> {
+        // Test that all capabilities we document actually parse
+        let capabilities = vec![
+            "CHOWN",
+            "DAC_OVERRIDE",
+            "DAC_READ_SEARCH",
+            "FOWNER",
+            "FSETID",
+            "KILL",
+            "SETGID",
+            "SETUID",
+            "SETPCAP",
+            "LINUX_IMMUTABLE",
+            "NET_BIND_SERVICE",
+            "NET_BROADCAST",
+            "NET_ADMIN",
+            "NET_RAW",
+            "IPC_LOCK",
+            "IPC_OWNER",
+            "SYS_MODULE",
+            "SYS_RAWIO",
+            "SYS_CHROOT",
+            "SYS_PTRACE",
+            "SYS_PACCT",
+            "SYS_ADMIN",
+            "SYS_BOOT",
+            "SYS_NICE",
+            "SYS_RESOURCE",
+            "SYS_TIME",
+            "SYS_TTY_CONFIG",
+            "MKNOD",
+            "LEASE",
+            "AUDIT_WRITE",
+            "AUDIT_CONTROL",
+            "SETFCAP",
+            "MAC_OVERRIDE",
+            "MAC_ADMIN",
+            "SYSLOG",
+            "WAKE_ALARM",
+            "BLOCK_SUSPEND",
+            "AUDIT_READ",
+        ];
+
+        for cap in capabilities {
+            parse_capability(cap)?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_drop_cap_bounding_set_noop() -> Result<()> {
+        // With false, should be a no-op
+        drop_cap_bounding_set(false)?;
         Ok(())
     }
 }

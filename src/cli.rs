@@ -49,7 +49,7 @@ pub struct Args {
     #[arg(long)]
     pub unshare_all: bool,
 
-    /// Retain the network namespace (only with --unshare-all)
+    /// Retain the network namespace (don't create network namespace)
     #[arg(long)]
     pub share_net: bool,
 
@@ -175,10 +175,6 @@ impl Args {
     pub fn validate(&self) -> eyre::Result<()> {
         if self.command.is_empty() {
             eyre::bail!("No command specified");
-        }
-
-        if self.share_net && !self.unshare_all {
-            eyre::bail!("--share-net can only be used with --unshare-all");
         }
 
         if self.hostname.is_some() && !self.unshare_uts {

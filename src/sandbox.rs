@@ -184,10 +184,15 @@ impl SandboxConfig {
         if args.unshare_all {
             unshare_user = true;
             unshare_pid = true;
-            unshare_net = !args.share_net;
+            unshare_net = true;
             unshare_ipc = true;
             unshare_uts = true;
             unshare_cgroup = true;
+        }
+
+        // Handle --share-net (disable network namespace)
+        if args.share_net {
+            unshare_net = false;
         }
 
         // Parse setenv (comes in pairs: VAR VALUE VAR VALUE...)
@@ -651,34 +656,529 @@ fn exec_command(command: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::Args;
 
-    #[test]
-    fn test_sandbox_config_basic() {
-        let config = SandboxConfig {
-            command: vec!["bash".to_string()],
-            setup_ops: vec![],
-            unshare_user: true,
+    fn create_minimal_args() -> Args {
+        Args {
+            unshare_user: false,
+            unshare_user_try: false,
+            unshare_ipc: false,
             unshare_pid: false,
             unshare_net: false,
-            unshare_ipc: false,
             unshare_uts: false,
             unshare_cgroup: false,
-            sandbox_uid: None,
-            sandbox_gid: None,
+            unshare_cgroup_try: false,
+            unshare_all: false,
+            share_net: false,
+            uid: None,
+            gid: None,
             hostname: None,
             chdir: None,
-            new_session: false,
-            die_with_parent: false,
             clearenv: false,
             setenv: vec![],
             unsetenv: vec![],
+            bind: vec![],
+            ro_bind: vec![],
+            bind_try: vec![],
+            ro_bind_try: vec![],
+            dev_bind: vec![],
+            dev_bind_try: vec![],
+            chmod: vec![],
+            proc: vec![],
+            dev: vec![],
+            tmpfs: vec![],
+            dir: vec![],
+            symlink: vec![],
+            remount_ro: vec![],
+            new_session: false,
+            die_with_parent: false,
+            as_pid_1: false,
+            disable_userns: false,
             cap_add: vec![],
             cap_drop: vec![],
-            seccomp_fd: None,
-        };
+            seccomp: None,
+            log_level: "warn".to_string(),
+            command: vec!["test".to_string()],
+        }
+    }
+
+    #[test]
+    fn test_from_args_minimal() -> Result<()> {
+        let args = create_minimal_args();
+        let config = SandboxConfig::from_args(&args)?;
+
+        assert_eq!(config.command, vec!["test"]);
+        assert_eq!(config.setup_ops.len(), 0);
+        assert!(!config.unshare_user);
+        assert!(!config.unshare_pid);
+        assert!(!config.clearenv);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_args_bind_mounts() -> Result<()> {
+        let mut args = create_minimal_args();
+        args.bind = vec!["/src1".to_string(), "/dst1".to_string()];
+        args.ro_bind = vec!["/src2".to_string(), "/dst2".to_string()];
+
+        let config = SandboxConfig::from_args(&args)?;
+
+        assert_eq!(config.setup_ops.len(), 2);
+
+        // Check first bind mount
+        match &config.setup_ops[0] {
+            SetupOp::BindMount {
+                source,
+                dest,
+                readonly,
+                devices,
+                recursive,
+            } => {
+                assert_eq!(source, &PathBuf::from("/src1"));
+                assert_eq!(dest, &PathBuf::from("/dst1"));
+                assert!(!readonly);
+                assert!(!devices);
+                assert!(recursive);
+            }
+            _ => panic!("Expected BindMount"),
+        }
+
+        // Check second bind mount (readonly)
+        match &config.setup_ops[1] {
+            SetupOp::BindMount {
+                source,
+                dest,
+                readonly,
+                devices,
+                recursive,
+            } => {
+                assert_eq!(source, &PathBuf::from("/src2"));
+                assert_eq!(dest, &PathBuf::from("/dst2"));
+                assert!(readonly);
+                assert!(!devices);
+                assert!(recursive);
+            }
+            _ => panic!("Expected BindMount"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_args_dev_bind() -> Result<()> {
+        let mut args = create_minimal_args();
+        args.dev_bind = vec!["/dev/sda".to_string(), "/mnt/dev".to_string()];
+
+        let config = SandboxConfig::from_args(&args)?;
+
+        assert_eq!(config.setup_ops.len(), 1);
+        match &config.setup_ops[0] {
+            SetupOp::BindMount {
+                source,
+                dest,
+                readonly,
+                devices,
+                recursive,
+            } => {
+                assert_eq!(source, &PathBuf::from("/dev/sda"));
+                assert_eq!(dest, &PathBuf::from("/mnt/dev"));
+                assert!(!readonly);
+                assert!(devices);
+                assert!(recursive);
+            }
+            _ => panic!("Expected BindMount with devices=true"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_args_bind_try() -> Result<()> {
+        let mut args = create_minimal_args();
+        args.bind_try = vec!["/optional/src".to_string(), "/dst".to_string()];
+        args.ro_bind_try = vec!["/optional/src2".to_string(), "/dst2".to_string()];
+
+        let config = SandboxConfig::from_args(&args)?;
+
+        assert_eq!(config.setup_ops.len(), 2);
+        assert!(matches!(config.setup_ops[0], SetupOp::BindMountTry { .. }));
+        assert!(matches!(config.setup_ops[1], SetupOp::BindMountTry { .. }));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_args_filesystem_ops() -> Result<()> {
+        let mut args = create_minimal_args();
+        args.proc = vec![PathBuf::from("/proc")];
+        args.dev = vec![PathBuf::from("/dev")];
+        args.tmpfs = vec![PathBuf::from("/tmp")];
+        args.dir = vec![PathBuf::from("/newdir")];
+        args.remount_ro = vec![PathBuf::from("/readonly")];
+
+        let config = SandboxConfig::from_args(&args)?;
+
+        assert_eq!(config.setup_ops.len(), 5);
+        assert!(matches!(config.setup_ops[0], SetupOp::MountProc { .. }));
+        assert!(matches!(config.setup_ops[1], SetupOp::MountDev { .. }));
+        assert!(matches!(config.setup_ops[2], SetupOp::MountTmpfs { .. }));
+        assert!(matches!(config.setup_ops[3], SetupOp::CreateDir { .. }));
+        assert!(matches!(config.setup_ops[4], SetupOp::RemountRo { .. }));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_args_symlinks() -> Result<()> {
+        let mut args = create_minimal_args();
+        args.symlink = vec!["/target".to_string(), "/link".to_string()];
+
+        let config = SandboxConfig::from_args(&args)?;
+
+        assert_eq!(config.setup_ops.len(), 1);
+        match &config.setup_ops[0] {
+            SetupOp::CreateSymlink { source, dest } => {
+                assert_eq!(source, "/target");
+                assert_eq!(dest, &PathBuf::from("/link"));
+            }
+            _ => panic!("Expected CreateSymlink"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_args_chmod() -> Result<()> {
+        let mut args = create_minimal_args();
+        args.chmod = vec!["755".to_string(), "/file".to_string()];
+
+        let config = SandboxConfig::from_args(&args)?;
+
+        assert_eq!(config.setup_ops.len(), 1);
+        match &config.setup_ops[0] {
+            SetupOp::Chmod { path, mode } => {
+                assert_eq!(path, &PathBuf::from("/file"));
+                assert_eq!(*mode, 0o755);
+            }
+            _ => panic!("Expected Chmod"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_args_chmod_with_leading_zero() -> Result<()> {
+        let mut args = create_minimal_args();
+        args.chmod = vec!["0644".to_string(), "/file".to_string()];
+
+        let config = SandboxConfig::from_args(&args)?;
+
+        match &config.setup_ops[0] {
+            SetupOp::Chmod { mode, .. } => {
+                assert_eq!(*mode, 0o644);
+            }
+            _ => panic!("Expected Chmod"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_args_unshare_all() -> Result<()> {
+        let mut args = create_minimal_args();
+        args.unshare_all = true;
+
+        let config = SandboxConfig::from_args(&args)?;
 
         assert!(config.unshare_user);
-        assert!(!config.unshare_pid);
-        assert_eq!(config.command, vec!["bash"]);
+        assert!(config.unshare_pid);
+        assert!(config.unshare_net);
+        assert!(config.unshare_ipc);
+        assert!(config.unshare_uts);
+        assert!(config.unshare_cgroup);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_args_unshare_all_with_share_net() -> Result<()> {
+        let mut args = create_minimal_args();
+        args.unshare_all = true;
+        args.share_net = true;
+
+        let config = SandboxConfig::from_args(&args)?;
+
+        assert!(config.unshare_user);
+        assert!(config.unshare_pid);
+        assert!(!config.unshare_net); // Should be false due to share_net
+        assert!(config.unshare_ipc);
+        assert!(config.unshare_uts);
+        assert!(config.unshare_cgroup);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_args_share_net_without_unshare_all() -> Result<()> {
+        let mut args = create_minimal_args();
+        args.unshare_net = true;
+        args.share_net = true; // This should override unshare_net
+
+        let config = SandboxConfig::from_args(&args)?;
+
+        assert!(!config.unshare_net); // Should be false due to share_net
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_args_share_net_alone() -> Result<()> {
+        let mut args = create_minimal_args();
+        args.share_net = true;
+
+        let config = SandboxConfig::from_args(&args)?;
+
+        assert!(!config.unshare_net); // Should remain false
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_args_individual_namespaces() -> Result<()> {
+        let mut args = create_minimal_args();
+        args.unshare_user = true;
+        args.unshare_pid = true;
+
+        let config = SandboxConfig::from_args(&args)?;
+
+        assert!(config.unshare_user);
+        assert!(config.unshare_pid);
+        assert!(!config.unshare_net);
+        assert!(!config.unshare_ipc);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_args_environment() -> Result<()> {
+        let mut args = create_minimal_args();
+        args.clearenv = true;
+        args.setenv = vec![
+            "FOO".to_string(),
+            "bar".to_string(),
+            "BAZ".to_string(),
+            "qux".to_string(),
+        ];
+        args.unsetenv = vec!["OLDVAR".to_string()];
+
+        let config = SandboxConfig::from_args(&args)?;
+
+        assert!(config.clearenv);
+        assert_eq!(config.setenv.len(), 2);
+        assert_eq!(config.setenv[0], ("FOO".to_string(), "bar".to_string()));
+        assert_eq!(config.setenv[1], ("BAZ".to_string(), "qux".to_string()));
+        assert_eq!(config.unsetenv, vec!["OLDVAR"]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_args_uid_gid() -> Result<()> {
+        let mut args = create_minimal_args();
+        args.uid = Some(1000);
+        args.gid = Some(1000);
+
+        let config = SandboxConfig::from_args(&args)?;
+
+        assert_eq!(config.sandbox_uid, Some(Uid::from_raw(1000)));
+        assert_eq!(config.sandbox_gid, Some(Gid::from_raw(1000)));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_args_hostname_chdir() -> Result<()> {
+        let mut args = create_minimal_args();
+        args.hostname = Some("sandbox".to_string());
+        args.chdir = Some(PathBuf::from("/workdir"));
+
+        let config = SandboxConfig::from_args(&args)?;
+
+        assert_eq!(config.hostname, Some("sandbox".to_string()));
+        assert_eq!(config.chdir, Some(PathBuf::from("/workdir")));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_args_process_flags() -> Result<()> {
+        let mut args = create_minimal_args();
+        args.new_session = true;
+        args.die_with_parent = true;
+
+        let config = SandboxConfig::from_args(&args)?;
+
+        assert!(config.new_session);
+        assert!(config.die_with_parent);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_args_capabilities() -> Result<()> {
+        let mut args = create_minimal_args();
+        args.cap_add = vec!["NET_ADMIN".to_string(), "SYS_PTRACE".to_string()];
+        args.cap_drop = vec!["SYS_ADMIN".to_string()];
+
+        let config = SandboxConfig::from_args(&args)?;
+
+        assert_eq!(config.cap_add, vec!["NET_ADMIN", "SYS_PTRACE"]);
+        assert_eq!(config.cap_drop, vec!["SYS_ADMIN"]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_args_seccomp() -> Result<()> {
+        let mut args = create_minimal_args();
+        args.seccomp = Some(3);
+
+        let config = SandboxConfig::from_args(&args)?;
+
+        assert_eq!(config.seccomp_fd, Some(3));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_args_complex_scenario() -> Result<()> {
+        let mut args = create_minimal_args();
+        args.unshare_all = true;
+        args.bind = vec!["/host/src".to_string(), "/container/dst".to_string()];
+        args.ro_bind = vec!["/etc".to_string(), "/etc".to_string()];
+        args.proc = vec![PathBuf::from("/proc")];
+        args.dev = vec![PathBuf::from("/dev")];
+        args.tmpfs = vec![PathBuf::from("/tmp")];
+        args.dir = vec![PathBuf::from("/workdir")];
+        args.setenv = vec!["PATH".to_string(), "/usr/bin".to_string()];
+        args.uid = Some(1000);
+        args.gid = Some(1000);
+        args.hostname = Some("container".to_string());
+        args.chdir = Some(PathBuf::from("/workdir"));
+        args.command = vec![
+            "bash".to_string(),
+            "-c".to_string(),
+            "echo hello".to_string(),
+        ];
+
+        let config = SandboxConfig::from_args(&args)?;
+
+        // Verify namespaces
+        assert!(config.unshare_user);
+        assert!(config.unshare_pid);
+        assert!(config.unshare_net);
+
+        // Verify setup operations
+        assert_eq!(config.setup_ops.len(), 6); // 1 bind + 1 ro_bind + proc + dev + tmpfs + dir
+
+        // Verify environment
+        assert_eq!(config.setenv.len(), 1);
+        assert_eq!(
+            config.setenv[0],
+            ("PATH".to_string(), "/usr/bin".to_string())
+        );
+
+        // Verify identity
+        assert_eq!(config.sandbox_uid, Some(Uid::from_raw(1000)));
+        assert_eq!(config.sandbox_gid, Some(Gid::from_raw(1000)));
+
+        // Verify other settings
+        assert_eq!(config.hostname, Some("container".to_string()));
+        assert_eq!(config.chdir, Some(PathBuf::from("/workdir")));
+        assert_eq!(config.command, vec!["bash", "-c", "echo hello"]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_args_multiple_bind_mounts() -> Result<()> {
+        let mut args = create_minimal_args();
+        args.bind = vec![
+            "/src1".to_string(),
+            "/dst1".to_string(),
+            "/src2".to_string(),
+            "/dst2".to_string(),
+            "/src3".to_string(),
+            "/dst3".to_string(),
+        ];
+
+        let config = SandboxConfig::from_args(&args)?;
+
+        assert_eq!(config.setup_ops.len(), 3);
+        for op in &config.setup_ops {
+            assert!(matches!(op, SetupOp::BindMount { .. }));
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_args_mixed_bind_mount_types() -> Result<()> {
+        let mut args = create_minimal_args();
+        args.bind = vec!["/rw/src".to_string(), "/rw/dst".to_string()];
+        args.ro_bind = vec!["/ro/src".to_string(), "/ro/dst".to_string()];
+        args.dev_bind = vec!["/dev/src".to_string(), "/dev/dst".to_string()];
+        args.bind_try = vec!["/try/src".to_string(), "/try/dst".to_string()];
+
+        let config = SandboxConfig::from_args(&args)?;
+
+        assert_eq!(config.setup_ops.len(), 4);
+
+        // First should be regular bind (not readonly, not devices)
+        match &config.setup_ops[0] {
+            SetupOp::BindMount {
+                readonly, devices, ..
+            } => {
+                assert!(!readonly);
+                assert!(!devices);
+            }
+            _ => panic!("Expected BindMount"),
+        }
+
+        // Second should be readonly bind
+        match &config.setup_ops[1] {
+            SetupOp::BindMount {
+                readonly, devices, ..
+            } => {
+                assert!(readonly);
+                assert!(!devices);
+            }
+            _ => panic!("Expected BindMount"),
+        }
+
+        // Third should be BindMountTry (bind_try is processed before dev_bind)
+        match &config.setup_ops[2] {
+            SetupOp::BindMountTry {
+                readonly, devices, ..
+            } => {
+                assert!(!readonly);
+                assert!(!devices);
+            }
+            _ => panic!("Expected BindMountTry"),
+        }
+
+        // Fourth should be dev bind (devices=true)
+        match &config.setup_ops[3] {
+            SetupOp::BindMount {
+                readonly, devices, ..
+            } => {
+                assert!(!readonly);
+                assert!(devices);
+            }
+            _ => panic!("Expected BindMount"),
+        }
+
+        Ok(())
     }
 }

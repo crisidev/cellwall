@@ -5,7 +5,7 @@ use crate::mount::{mount_devpts, mount_proc, mount_tmpfs, remount_ro};
 use crate::utils::{create_parent_dirs, ensure_dir, ensure_file};
 use eyre::Result;
 use std::fs;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
 /// Setup operation types
@@ -272,27 +272,4 @@ fn setup_dev_filesystem<P: AsRef<Path>>(dest: P) -> Result<()> {
     log::debug!("/dev filesystem setup complete");
 
     Ok(())
-}
-
-use std::os::unix::fs::PermissionsExt;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_setup_op_creation() {
-        let op = SetupOp::CreateDir {
-            path: PathBuf::from("/tmp/test"),
-            mode: 0o755,
-        };
-
-        match op {
-            SetupOp::CreateDir { path, mode } => {
-                assert_eq!(path, PathBuf::from("/tmp/test"));
-                assert_eq!(mode, 0o755);
-            }
-            _ => panic!("Wrong variant"),
-        }
-    }
 }
