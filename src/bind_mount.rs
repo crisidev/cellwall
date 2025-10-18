@@ -173,6 +173,22 @@ fn parse_submounts(root_mount: &Path) -> Result<Vec<(PathBuf, MsFlags)>> {
             continue;
         }
 
+        // Skip mounts created after our root mount
+        // This is critical for supporting writable bind mounts under readonly parents.
+        // When a mount is created after our root mount, it should not be remounted
+        // because it was set up independently with its own flags.
+        // Mount IDs are assigned sequentially by the kernel, so if mount_id > root_id,
+        // it means this mount was created after our mount operation.
+        if line.id > root_id {
+            log::debug!(
+                "Skipping mount {} (mount_id={} > root_id={}, created after root mount)",
+                line.mountpoint.display(),
+                line.id,
+                root_id
+            );
+            continue;
+        }
+
         // Check if this mount point is under our root_mount path
         if !line.mountpoint.starts_with(root_mount) {
             continue;
