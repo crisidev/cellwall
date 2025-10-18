@@ -23,6 +23,74 @@ pub enum BindMountResult {
     InvalidTarget,
 }
 
+/// Parse mount options from a comma-separated string into MsFlags
+/// Based on bubblewrap's decode_mountoptions function
+fn parse_mount_options(options: &str) -> MsFlags {
+    let mut flags = MsFlags::empty();
+
+    for opt in options.split(',') {
+        match opt {
+            "ro" => flags |= MsFlags::MS_RDONLY,
+            "nosuid" => flags |= MsFlags::MS_NOSUID,
+            "nodev" => flags |= MsFlags::MS_NODEV,
+            "noexec" => flags |= MsFlags::MS_NOEXEC,
+            "noatime" => flags |= MsFlags::MS_NOATIME,
+            "nodiratime" => flags |= MsFlags::MS_NODIRATIME,
+            "relatime" => flags |= MsFlags::MS_RELATIME,
+            // "rw" and other options don't have flags
+            _ => {}
+        }
+    }
+
+    flags
+}
+
+/// Get the current mount flags for a given mount point from /proc/self/mountinfo
+/// Returns None if the mount point is not found
+fn get_mount_flags(mount_point: &Path) -> Result<Option<MsFlags>> {
+    log::debug!(
+        "Looking up mount flags for {}",
+        mount_point.display()
+    );
+
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo")
+        .context("Failed to read /proc/self/mountinfo")?;
+
+    // Canonicalize the mount point to match what's in mountinfo
+    let canonical = mount_point.canonicalize()
+        .context("Failed to canonicalize mount point")?;
+
+    for line in mountinfo.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 6 {
+            continue;
+        }
+
+        // Format: mount_id parent_id major:minor root mount_point options ...
+        // mount_point is at index 4, options at index 5
+        let mount_path = PathBuf::from(parts[4]);
+
+        // Check if this is the mount we're looking for
+        if mount_path == canonical {
+            let options = parts[5];
+            let flags = parse_mount_options(options);
+            log::debug!(
+                "Found mount flags for {}: {:?} (from options: {})",
+                mount_point.display(),
+                flags,
+                options
+            );
+            return Ok(Some(flags));
+        }
+    }
+
+    log::debug!(
+        "No mount flags found for {} in /proc/self/mountinfo",
+        mount_point.display()
+    );
+    Ok(None)
+}
+
 /// Parse /proc/self/mountinfo to find all submounts under a given path
 /// Returns a list of mount points that are children of the root_mount path
 fn parse_submounts(root_mount: &Path) -> Result<Vec<PathBuf>> {
@@ -106,11 +174,32 @@ pub fn bind_mount<P: AsRef<Path>, Q: AsRef<Path>>(
     // Important: We need to apply all flags in a single remount operation
     // because separate remounts will override each other
     //
+    // We preserve existing mount flags and OR them with our security flags
+    // This matches bubblewrap's behavior (see bind-mount.c lines 448-450)
+    //
     // Security flags applied:
     // - MS_NOSUID: Always applied to prevent setuid escalation (matches bubblewrap)
     // - MS_RDONLY: Applied if READONLY flag is set
     // - MS_NODEV: Applied unless DEVICES flag is set
-    let mut remount_flags = MsFlags::MS_BIND | MsFlags::MS_REMOUNT;
+
+    // Get existing mount flags from /proc/self/mountinfo
+    let existing_flags = match get_mount_flags(dest) {
+        Ok(Some(flags)) => {
+            log::debug!("Preserving existing mount flags: {:?}", flags);
+            flags
+        }
+        Ok(None) => {
+            log::debug!("No existing mount flags found, starting fresh");
+            MsFlags::empty()
+        }
+        Err(e) => {
+            log::warn!("Failed to get existing mount flags: {}, starting fresh", e);
+            MsFlags::empty()
+        }
+    };
+
+    // Build new flags by OR'ing existing flags with our security requirements
+    let mut remount_flags = MsFlags::MS_BIND | MsFlags::MS_REMOUNT | existing_flags;
 
     // Always add MS_NOSUID for security (prevents setuid escalation)
     log::debug!("Applying nosuid restriction (always for security)");
@@ -153,6 +242,27 @@ pub fn bind_mount<P: AsRef<Path>, Q: AsRef<Path>>(
                 for submount in submounts {
                     log::debug!("Remounting submount: {}", submount.display());
 
+                    // Get existing flags for this submount
+                    let submount_existing_flags = match get_mount_flags(&submount) {
+                        Ok(Some(flags)) => {
+                            log::debug!("Preserving existing flags for submount: {:?}", flags);
+                            flags
+                        }
+                        Ok(None) | Err(_) => MsFlags::empty(),
+                    };
+
+                    // Build flags for submount (same logic as main mount)
+                    let mut submount_flags = MsFlags::MS_BIND | MsFlags::MS_REMOUNT | submount_existing_flags;
+                    submount_flags |= MsFlags::MS_NOSUID;
+
+                    if flags.contains(BindMountFlags::READONLY) {
+                        submount_flags |= MsFlags::MS_RDONLY;
+                    }
+
+                    if !flags.contains(BindMountFlags::DEVICES) {
+                        submount_flags |= MsFlags::MS_NODEV;
+                    }
+
                     // Try to remount with the same flags
                     // If we get EACCES (permission denied), that's OK - it means the user
                     // can't access it anyway, so it doesn't need extra protection
@@ -160,7 +270,7 @@ pub fn bind_mount<P: AsRef<Path>, Q: AsRef<Path>>(
                         None::<&str>,
                         &submount,
                         None::<&str>,
-                        remount_flags,
+                        submount_flags,
                         None::<&str>,
                     ) {
                         Ok(_) => {
