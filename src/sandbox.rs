@@ -6,7 +6,6 @@ use crate::mount::make_slave;
 use crate::namespace::{unshare_namespaces, write_uid_gid_map};
 use crate::network::setup_loopback;
 use crate::setup::{SetupOp, execute_setup_op};
-use crate::status;
 use eyre::{Context, Result};
 use nix::sched::CloneFlags;
 use nix::sys::wait::{WaitStatus, waitpid};
@@ -35,8 +34,6 @@ pub struct SandboxConfig {
     pub cap_add: Vec<String>,
     pub cap_drop: Vec<String>,
     pub seccomp_fd: Option<i32>,
-    pub info_fd: Option<i32>,
-    pub json_status_fd: Option<i32>,
 }
 
 impl SandboxConfig {
@@ -261,240 +258,104 @@ impl SandboxConfig {
             cap_add: args.cap_add.clone(),
             cap_drop: args.cap_drop.clone(),
             seccomp_fd: args.seccomp,
-            info_fd: args.info_fd,
-            json_status_fd: args.json_status_fd,
         })
     }
-}
 
-/// Run the sandbox
-pub fn run_sandbox(config: SandboxConfig) -> Result<()> {
-    log::info!("Starting sandbox setup");
-    log::debug!("Command to execute: {:?}", config.command);
+    /// Run the sandbox
+    pub fn run(self) -> Result<()> {
+        log::info!("Starting sandbox setup");
+        log::debug!("Command to execute: {:?}", self.command);
 
-    let real_uid = getuid();
-    let real_gid = getgid();
-    log::debug!("Real UID: {}, Real GID: {}", real_uid, real_gid);
+        let real_uid = getuid();
+        let real_gid = getgid();
+        log::debug!("Real UID: {}, Real GID: {}", real_uid, real_gid);
 
-    let sandbox_uid = config.sandbox_uid.unwrap_or(real_uid);
-    let sandbox_gid = config.sandbox_gid.unwrap_or(real_gid);
-    log::debug!("Sandbox UID: {}, Sandbox GID: {}", sandbox_uid, sandbox_gid);
+        let sandbox_uid = self.sandbox_uid.unwrap_or(real_uid);
+        let sandbox_gid = self.sandbox_gid.unwrap_or(real_gid);
+        log::debug!("Sandbox UID: {}, Sandbox GID: {}", sandbox_uid, sandbox_gid);
 
-    // Build namespace flags
-    let mut clone_flags = CloneFlags::empty();
-    log::debug!("Building namespace configuration...");
+        // Build namespace flags
+        let mut clone_flags = CloneFlags::empty();
+        log::debug!("Building namespace configuration...");
 
-    // Check if we're trying to mount proc (requires PID namespace)
-    let needs_proc = config
-        .setup_ops
-        .iter()
-        .any(|op| matches!(op, SetupOp::MountProc { .. }));
-    log::debug!("Needs proc mount: {}", needs_proc);
+        // Check if we're trying to mount proc (requires PID namespace)
+        let needs_proc = self
+            .setup_ops
+            .iter()
+            .any(|op| matches!(op, SetupOp::MountProc { .. }));
+        log::debug!("Needs proc mount: {}", needs_proc);
 
-    // Only create mount namespace if we have setup operations that need it
-    let needs_mount_ns = !config.setup_ops.is_empty()
-        || config.unshare_user
-        || config.unshare_pid
-        || config.unshare_net
-        || config.unshare_ipc
-        || config.unshare_uts
-        || config.unshare_cgroup;
-    log::debug!("Needs mount namespace: {}", needs_mount_ns);
+        // Only create mount namespace if we have setup operations that need it
+        let needs_mount_ns = !self.setup_ops.is_empty()
+            || self.unshare_user
+            || self.unshare_pid
+            || self.unshare_net
+            || self.unshare_ipc
+            || self.unshare_uts
+            || self.unshare_cgroup;
+        log::debug!("Needs mount namespace: {}", needs_mount_ns);
 
-    // If we need mount namespace but not running as root, we need user namespace
-    let mut needs_user_ns = config.unshare_user;
-    if needs_mount_ns && real_uid != Uid::from_raw(0) {
-        needs_user_ns = true;
-        log::debug!("Non-root user needs mount namespace, enabling user namespace");
-    }
+        // If we need mount namespace but not running as root, we need user namespace
+        let mut needs_user_ns = self.unshare_user;
+        if needs_mount_ns && real_uid != Uid::from_raw(0) {
+            needs_user_ns = true;
+            log::debug!("Non-root user needs mount namespace, enabling user namespace");
+        }
 
-    // Mounting proc requires PID namespace
-    let mut needs_pid_ns = config.unshare_pid;
-    if needs_proc {
-        needs_pid_ns = true;
-        log::debug!("Proc mount requires PID namespace, enabling PID namespace");
-    }
+        // Mounting proc requires PID namespace
+        let mut needs_pid_ns = self.unshare_pid;
+        if needs_proc {
+            needs_pid_ns = true;
+            log::debug!("Proc mount requires PID namespace, enabling PID namespace");
+        }
 
-    if needs_mount_ns {
-        clone_flags |= CloneFlags::CLONE_NEWNS;
-        log::debug!("Enabling CLONE_NEWNS (mount namespace)");
-    }
+        if needs_mount_ns {
+            clone_flags |= CloneFlags::CLONE_NEWNS;
+            log::debug!("Enabling CLONE_NEWNS (mount namespace)");
+        }
 
-    if needs_user_ns {
-        clone_flags |= CloneFlags::CLONE_NEWUSER;
-        log::debug!("Enabling CLONE_NEWUSER (user namespace)");
-    }
-    if needs_pid_ns {
-        clone_flags |= CloneFlags::CLONE_NEWPID;
-        log::debug!("Enabling CLONE_NEWPID (PID namespace)");
-    }
-    if config.unshare_net {
-        clone_flags |= CloneFlags::CLONE_NEWNET;
-        log::debug!("Enabling CLONE_NEWNET (network namespace)");
-    }
-    if config.unshare_ipc {
-        clone_flags |= CloneFlags::CLONE_NEWIPC;
-        log::debug!("Enabling CLONE_NEWIPC (IPC namespace)");
-    }
-    if config.unshare_uts {
-        clone_flags |= CloneFlags::CLONE_NEWUTS;
-        log::debug!("Enabling CLONE_NEWUTS (UTS namespace)");
-    }
-    if config.unshare_cgroup {
-        clone_flags |= CloneFlags::CLONE_NEWCGROUP;
-        log::debug!("Enabling CLONE_NEWCGROUP (cgroup namespace)");
-    }
+        if needs_user_ns {
+            clone_flags |= CloneFlags::CLONE_NEWUSER;
+            log::debug!("Enabling CLONE_NEWUSER (user namespace)");
+        }
+        if needs_pid_ns {
+            clone_flags |= CloneFlags::CLONE_NEWPID;
+            log::debug!("Enabling CLONE_NEWPID (PID namespace)");
+        }
+        if self.unshare_net {
+            clone_flags |= CloneFlags::CLONE_NEWNET;
+            log::debug!("Enabling CLONE_NEWNET (network namespace)");
+        }
+        if self.unshare_ipc {
+            clone_flags |= CloneFlags::CLONE_NEWIPC;
+            log::debug!("Enabling CLONE_NEWIPC (IPC namespace)");
+        }
+        if self.unshare_uts {
+            clone_flags |= CloneFlags::CLONE_NEWUTS;
+            log::debug!("Enabling CLONE_NEWUTS (UTS namespace)");
+        }
+        if self.unshare_cgroup {
+            clone_flags |= CloneFlags::CLONE_NEWCGROUP;
+            log::debug!("Enabling CLONE_NEWCGROUP (cgroup namespace)");
+        }
 
-    // Determine if we need to fork for monitoring/status reporting
-    let needs_fork = needs_pid_ns || config.info_fd.is_some() || config.json_status_fd.is_some();
-
-    // Only unshare if we have namespaces to create
-    if !clone_flags.is_empty() {
-        log::info!("Unsharing namespaces: {:?}", clone_flags);
-        unshare_namespaces(clone_flags)?;
-        log::debug!("Successfully unshared namespaces");
+        // Only unshare if we have namespaces to create
+        if !clone_flags.is_empty() {
+            log::info!("Unsharing namespaces: {:?}", clone_flags);
+            unshare_namespaces(clone_flags)?;
+            log::debug!("Successfully unshared namespaces");
+        }
 
         // Fork if we need PID namespace or status reporting
-        if needs_fork {
-            log::debug!("Forking for PID namespace and/or status reporting...");
-            match unsafe { fork() }? {
-                ForkResult::Parent { child } => {
-                    // Parent: report status, wait for child and exit with its status
-                    log::debug!("Parent process waiting for child PID {}", child);
-
-                    // Report sandbox information if requested
-                    if config.info_fd.is_some() || config.json_status_fd.is_some() {
-                        log::debug!("Reading namespace IDs for child PID {}", child);
-                        // Read namespace IDs from the child process
-                        match status::read_namespace_ids(child.as_raw()) {
-                            Ok(namespaces) => {
-                                // Report info_fd format
-                                if let Some(fd) = config.info_fd {
-                                    log::debug!("Reporting status to info_fd {}", fd);
-                                    if let Err(e) =
-                                        status::report_info(fd, child.as_raw(), &namespaces)
-                                    {
-                                        log::warn!("Failed to write to info_fd: {}", e);
-                                    }
-                                }
-
-                                // Report json_status_fd format
-                                if let Some(fd) = config.json_status_fd {
-                                    log::debug!("Reporting status to json_status_fd {}", fd);
-                                    if let Err(e) =
-                                        status::report_json_status(fd, child.as_raw(), &namespaces)
-                                    {
-                                        log::warn!("Failed to write to json_status_fd: {}", e);
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                log::warn!("Failed to read namespace IDs: {}", e);
-                            }
-                        }
-                    }
-
-                    // Wait for child to exit
-                    match waitpid(child, None)? {
-                        WaitStatus::Exited(_, status) => {
-                            log::debug!("Child exited with status {}", status);
-
-                            // Report exit status to json_status_fd if configured
-                            if let Some(fd) = config.json_status_fd {
-                                if let Err(e) = status::report_exit_status(fd, status) {
-                                    log::warn!(
-                                        "Failed to write exit status to json_status_fd: {}",
-                                        e
-                                    );
-                                }
-                            }
-
-                            std::process::exit(status);
-                        }
-                        WaitStatus::Signaled(_, sig, _) => {
-                            log::debug!("Child terminated by signal {}", sig);
-                            let exit_code = 128 + sig as i32;
-
-                            // Report exit status to json_status_fd if configured
-                            if let Some(fd) = config.json_status_fd {
-                                if let Err(e) = status::report_exit_status(fd, exit_code) {
-                                    log::warn!(
-                                        "Failed to write exit status to json_status_fd: {}",
-                                        e
-                                    );
-                                }
-                            }
-
-                            std::process::exit(exit_code);
-                        }
-                        _ => {
-                            log::debug!("Child exited with unknown status");
-
-                            // Report exit status to json_status_fd if configured
-                            if let Some(fd) = config.json_status_fd {
-                                if let Err(e) = status::report_exit_status(fd, 1) {
-                                    log::warn!(
-                                        "Failed to write exit status to json_status_fd: {}",
-                                        e
-                                    );
-                                }
-                            }
-
-                            std::process::exit(1);
-                        }
-                    }
-                }
-                ForkResult::Child => {
-                    // Child continues with the sandbox setup
-                    log::debug!("Child process entered PID namespace, continuing setup...");
-                }
-            }
-        }
-    } else if needs_fork {
-        // Even without namespaces, we need to fork if status reporting is requested
-        log::debug!("Forking for status reporting (no namespaces)...");
         match unsafe { fork() }? {
             ForkResult::Parent { child } => {
-                log::debug!("Parent process monitoring child PID {}", child);
-
-                // Report sandbox information if requested
-                if config.info_fd.is_some() || config.json_status_fd.is_some() {
-                    log::debug!("Reading namespace IDs for child PID {}", child);
-                    match status::read_namespace_ids(child.as_raw()) {
-                        Ok(namespaces) => {
-                            if let Some(fd) = config.info_fd {
-                                log::debug!("Reporting status to info_fd {}", fd);
-                                if let Err(e) = status::report_info(fd, child.as_raw(), &namespaces)
-                                {
-                                    log::warn!("Failed to write to info_fd: {}", e);
-                                }
-                            }
-
-                            if let Some(fd) = config.json_status_fd {
-                                log::debug!("Reporting status to json_status_fd {}", fd);
-                                if let Err(e) =
-                                    status::report_json_status(fd, child.as_raw(), &namespaces)
-                                {
-                                    log::warn!("Failed to write to json_status_fd: {}", e);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!("Failed to read namespace IDs: {}", e);
-                        }
-                    }
-                }
+                // Parent: report status, wait for child and exit with its status
+                log::debug!("Parent process waiting for child PID {}", child);
 
                 // Wait for child to exit
                 match waitpid(child, None)? {
                     WaitStatus::Exited(_, status) => {
                         log::debug!("Child exited with status {}", status);
-
-                        if let Some(fd) = config.json_status_fd {
-                            if let Err(e) = status::report_exit_status(fd, status) {
-                                log::warn!("Failed to write exit status to json_status_fd: {}", e);
-                            }
-                        }
 
                         std::process::exit(status);
                     }
@@ -502,199 +363,186 @@ pub fn run_sandbox(config: SandboxConfig) -> Result<()> {
                         log::debug!("Child terminated by signal {}", sig);
                         let exit_code = 128 + sig as i32;
 
-                        if let Some(fd) = config.json_status_fd {
-                            if let Err(e) = status::report_exit_status(fd, exit_code) {
-                                log::warn!("Failed to write exit status to json_status_fd: {}", e);
-                            }
-                        }
-
                         std::process::exit(exit_code);
                     }
                     _ => {
                         log::debug!("Child exited with unknown status");
-
-                        if let Some(fd) = config.json_status_fd {
-                            if let Err(e) = status::report_exit_status(fd, 1) {
-                                log::warn!("Failed to write exit status to json_status_fd: {}", e);
-                            }
-                        }
 
                         std::process::exit(1);
                     }
                 }
             }
             ForkResult::Child => {
-                log::debug!("Child process continuing with sandbox setup...");
+                // Child continues with the sandbox setup
+                log::debug!("Child process entered PID namespace, continuing setup...");
             }
         }
-    } else {
-        log::debug!("No namespaces to create and no status reporting, skipping fork");
-    }
 
-    // Setup user namespace mappings if needed
-    if needs_user_ns {
-        log::info!(
-            "Setting up user namespace mappings: sandbox_uid={}, sandbox_gid={}, real_uid={}, real_gid={}",
-            sandbox_uid,
-            sandbox_gid,
-            real_uid,
-            real_gid
-        );
-        write_uid_gid_map(
-            -1,
-            sandbox_uid,
-            real_uid,
-            sandbox_gid,
-            real_gid,
-            None,
-            true,
-            false,
-            Uid::from_raw(65534), // overflow_uid
-            Gid::from_raw(65534), // overflow_gid
-        )?;
-        log::debug!("User namespace mappings written successfully");
-    }
+        // Setup user namespace mappings if needed
+        if needs_user_ns {
+            log::info!(
+                "Setting up user namespace mappings: sandbox_uid={}, sandbox_gid={}, real_uid={}, real_gid={}",
+                sandbox_uid,
+                sandbox_gid,
+                real_uid,
+                real_gid
+            );
+            write_uid_gid_map(
+                -1,
+                sandbox_uid,
+                real_uid,
+                sandbox_gid,
+                real_gid,
+                None,
+                true,
+                false,
+                Uid::from_raw(65534), // overflow_uid
+                Gid::from_raw(65534), // overflow_gid
+            )?;
+            log::debug!("User namespace mappings written successfully");
+        }
 
-    // Setup network namespace
-    if config.unshare_net {
-        log::info!("Setting up network namespace (loopback interface)");
-        setup_loopback().wrap_err("Failed to setup loopback interface")?;
-        log::debug!("Loopback interface configured");
-    }
+        // Setup network namespace
+        if self.unshare_net {
+            log::info!("Setting up network namespace (loopback interface)");
+            setup_loopback().wrap_err("Failed to setup loopback interface")?;
+            log::debug!("Loopback interface configured");
+        }
 
-    // Make root mount slave to prevent propagation (only if we have mount namespace)
-    if needs_mount_ns {
-        log::debug!("Making root mount slave to prevent propagation");
-        make_slave("/")?;
-        log::debug!("Root mount is now slave");
-    }
+        // Make root mount slave to prevent propagation (only if we have mount namespace)
+        if needs_mount_ns {
+            log::debug!("Making root mount slave to prevent propagation");
+            make_slave("/")?;
+            log::debug!("Root mount is now slave");
+        }
 
-    // Execute all setup operations
-    log::info!("Executing {} setup operations", config.setup_ops.len());
-    for (idx, op) in config.setup_ops.iter().enumerate() {
-        log::debug!(
-            "Setup operation {}/{}: {:?}",
-            idx + 1,
-            config.setup_ops.len(),
-            op
-        );
-        execute_setup_op(op)?;
-        log::debug!(
-            "Setup operation {}/{} completed",
-            idx + 1,
-            config.setup_ops.len()
-        );
-    }
-    log::info!("All setup operations completed successfully");
+        // Execute all setup operations
+        log::info!("Executing {} setup operations", self.setup_ops.len());
+        for (idx, op) in self.setup_ops.iter().enumerate() {
+            log::debug!(
+                "Setup operation {}/{}: {:?}",
+                idx + 1,
+                self.setup_ops.len(),
+                op
+            );
+            execute_setup_op(op)?;
+            log::debug!(
+                "Setup operation {}/{} completed",
+                idx + 1,
+                self.setup_ops.len()
+            );
+        }
+        log::info!("All setup operations completed successfully");
 
-    // Set hostname if requested
-    if let Some(hostname) = &config.hostname {
-        log::info!("Setting hostname to: {}", hostname);
-        nix::unistd::sethostname(hostname)?;
-        log::debug!("Hostname set successfully");
-    }
+        // Set hostname if requested
+        if let Some(hostname) = &self.hostname {
+            log::info!("Setting hostname to: {}", hostname);
+            nix::unistd::sethostname(hostname)?;
+            log::debug!("Hostname set successfully");
+        }
 
-    // Setup die-with-parent (before changing directory/session)
-    if config.die_with_parent {
-        log::debug!("Setting PR_SET_PDEATHSIG to SIGKILL (die with parent)");
-        set_pdeathsig(libc::SIGKILL)?;
-        log::debug!("Parent death signal configured");
-    }
+        // Setup die-with-parent (before changing directory/session)
+        if self.die_with_parent {
+            log::debug!("Setting PR_SET_PDEATHSIG to SIGKILL (die with parent)");
+            set_pdeathsig(libc::SIGKILL)?;
+            log::debug!("Parent death signal configured");
+        }
 
-    // Create new session if requested
-    if config.new_session {
-        log::debug!("Creating new session (setsid)");
-        setsid()?;
-        log::debug!("New session created");
-    }
+        // Create new session if requested
+        if self.new_session {
+            log::debug!("Creating new session (setsid)");
+            setsid()?;
+            log::debug!("New session created");
+        }
 
-    // Change directory if requested
-    if let Some(dir) = &config.chdir {
-        log::info!("Changing directory to: {}", dir.display());
-        chdir(dir.as_path())?;
-        log::debug!("Directory changed successfully");
-    }
+        // Change directory if requested
+        if let Some(dir) = &self.chdir {
+            log::info!("Changing directory to: {}", dir.display());
+            chdir(dir.as_path())?;
+            log::debug!("Directory changed successfully");
+        }
 
-    // Setup environment variables
-    if config.clearenv {
-        log::debug!("Clearing all environment variables");
-        let var_count = std::env::vars().count();
-        std::env::vars().for_each(|(key, _)| unsafe {
-            std::env::remove_var(&key);
-        });
-        log::debug!("Cleared {} environment variables", var_count);
-        // Keep PWD
-        if let Ok(pwd) = std::env::current_dir() {
+        // Setup environment variables
+        if self.clearenv {
+            log::debug!("Clearing all environment variables");
+            let var_count = std::env::vars().count();
+            std::env::vars().for_each(|(key, _)| unsafe {
+                std::env::remove_var(&key);
+            });
+            log::debug!("Cleared {} environment variables", var_count);
+            // Keep PWD
+            if let Ok(pwd) = std::env::current_dir() {
+                unsafe {
+                    std::env::set_var("PWD", pwd);
+                }
+                log::debug!("Restored PWD environment variable");
+            }
+        }
+
+        for var in &self.unsetenv {
+            log::debug!("Unsetting environment variable: {}", var);
             unsafe {
-                std::env::set_var("PWD", pwd);
+                std::env::remove_var(var);
             }
-            log::debug!("Restored PWD environment variable");
         }
-    }
 
-    for var in &config.unsetenv {
-        log::debug!("Unsetting environment variable: {}", var);
-        unsafe {
-            std::env::remove_var(var);
+        for (var, value) in &self.setenv {
+            log::debug!("Setting environment variable: {}={}", var, value);
+            unsafe {
+                std::env::set_var(var, value);
+            }
         }
-    }
 
-    for (var, value) in &config.setenv {
-        log::debug!("Setting environment variable: {}={}", var, value);
-        unsafe {
-            std::env::set_var(var, value);
+        if !self.setenv.is_empty() {
+            log::info!("Set {} environment variables", self.setenv.len());
         }
+
+        // Log what we're about to execute BEFORE loading seccomp
+        // (logging after seccomp can cause issues)
+        log::info!("Preparing to execute command: {:?}", self.command);
+
+        // Apply capability changes (only for root)
+        if real_uid == Uid::from_raw(0) && (!self.cap_add.is_empty() || !self.cap_drop.is_empty()) {
+            log::info!(
+                "Applying capability changes: add={:?}, drop={:?}",
+                self.cap_add,
+                self.cap_drop
+            );
+            apply_capability_changes(&self.cap_add, &self.cap_drop)?;
+            log::debug!("Capability changes applied successfully");
+        }
+
+        // Drop privileges before loading seccomp (if not root)
+        if real_uid != Uid::from_raw(0) {
+            log::debug!("Dropping all capabilities (non-root user)");
+            drop_all_caps()?;
+            log::debug!("All capabilities dropped");
+        } else if needs_user_ns {
+            // Set ambient capabilities for unprivileged execution
+            log::debug!("Setting ambient capabilities for user namespace");
+            set_ambient_capabilities()?;
+            log::debug!("Ambient capabilities set");
+        }
+
+        // Apply seccomp filter if provided
+        // IMPORTANT: This must be the LAST thing we do before exec!
+        // After loading seccomp, we cannot safely do any Rust operations
+        // (logging, error handling, etc.) as they may trigger syscalls or
+        // memory operations that could conflict with the filter
+        if let Some(fd) = self.seccomp_fd {
+            log::info!("Loading seccomp filter from FD {}", fd);
+            load_seccomp_from_fd(fd)?;
+            // NO LOGGING AFTER THIS POINT - seccomp is active!
+        } else {
+            log::debug!("No seccomp filter requested");
+        }
+
+        // Execute the command immediately after seccomp
+        log::info!("Executing command now: {:?}", self.command);
+        exec_command(&self.command)?;
+
+        Ok(())
     }
-
-    if !config.setenv.is_empty() {
-        log::info!("Set {} environment variables", config.setenv.len());
-    }
-
-    // Log what we're about to execute BEFORE loading seccomp
-    // (logging after seccomp can cause issues)
-    log::info!("Preparing to execute command: {:?}", config.command);
-
-    // Apply capability changes (only for root)
-    if real_uid == Uid::from_raw(0) && (!config.cap_add.is_empty() || !config.cap_drop.is_empty()) {
-        log::info!(
-            "Applying capability changes: add={:?}, drop={:?}",
-            config.cap_add,
-            config.cap_drop
-        );
-        apply_capability_changes(&config.cap_add, &config.cap_drop)?;
-        log::debug!("Capability changes applied successfully");
-    }
-
-    // Drop privileges before loading seccomp (if not root)
-    if real_uid != Uid::from_raw(0) {
-        log::debug!("Dropping all capabilities (non-root user)");
-        drop_all_caps()?;
-        log::debug!("All capabilities dropped");
-    } else if needs_user_ns {
-        // Set ambient capabilities for unprivileged execution
-        log::debug!("Setting ambient capabilities for user namespace");
-        set_ambient_capabilities()?;
-        log::debug!("Ambient capabilities set");
-    }
-
-    // Apply seccomp filter if provided
-    // IMPORTANT: This must be the LAST thing we do before exec!
-    // After loading seccomp, we cannot safely do any Rust operations
-    // (logging, error handling, etc.) as they may trigger syscalls or
-    // memory operations that could conflict with the filter
-    if let Some(fd) = config.seccomp_fd {
-        log::info!("Loading seccomp filter from FD {}", fd);
-        load_seccomp_from_fd(fd)?;
-        // NO LOGGING AFTER THIS POINT - seccomp is active!
-    } else {
-        log::debug!("No seccomp filter requested");
-    }
-
-    // Execute the command immediately after seccomp
-    log::info!("Executing command now: {:?}", config.command);
-    exec_command(&config.command)?;
-
-    Ok(())
 }
 
 /// Set no new privileges flag (safer wrapper around prctl)
@@ -834,10 +682,7 @@ fn exec_command(command: &[String]) -> Result<()> {
     }
 
     // exec() replaces the current process and never returns
-    let err = cmd.exec();
-
-    // exec only returns if there's an error
-    Err(err.into())
+    Err(cmd.exec().into())
 }
 
 #[cfg(test)]
@@ -886,8 +731,6 @@ mod tests {
             cap_add: vec![],
             cap_drop: vec![],
             seccomp: None,
-            info_fd: None,
-            json_status_fd: None,
             log_level: "warn".to_string(),
             command: vec!["test".to_string()],
         }

@@ -2,6 +2,7 @@
 
 use eyre::{Context, Result};
 use nix::unistd::{Gid, Uid, setgid, setuid};
+use std::collections::HashSet;
 
 /// Drop all capabilities
 pub fn drop_all_caps() -> Result<()> {
@@ -214,8 +215,6 @@ pub fn drop_capabilities(caps_to_drop: &[String]) -> Result<()> {
 /// Apply capability changes (add/drop) in one operation
 /// This computes the final capability set and applies it atomically
 pub fn apply_capability_changes(cap_add: &[String], cap_drop: &[String]) -> Result<()> {
-    use std::collections::HashSet;
-
     // Start with current capabilities
     let current_permitted = caps::read(None, caps::CapSet::Permitted)?;
     log::debug!("Current permitted capabilities: {:?}", current_permitted);

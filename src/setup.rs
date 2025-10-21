@@ -1,12 +1,14 @@
 //! Sandbox setup operations
 
+use std::fs;
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+use std::path::{Path, PathBuf};
+
+use eyre::Result;
+
 use crate::bind_mount::{BindMountFlags, bind_mount};
 use crate::mount::{mount_devpts, mount_proc, mount_tmpfs, remount_ro};
 use crate::utils::{create_parent_dirs, ensure_dir, ensure_file};
-use eyre::Result;
-use std::fs;
-use std::os::unix::fs::{PermissionsExt, symlink};
-use std::path::{Path, PathBuf};
 
 /// Setup operation types
 #[derive(Debug, Clone)]
@@ -228,7 +230,6 @@ pub fn execute_setup_op(op: &SetupOp) -> Result<()> {
             // This is used to detect race conditions after the mount
             // We use the original fd_path for fstat to avoid TOCTOU issues
             let fd_stat = {
-                use std::os::unix::fs::MetadataExt;
                 let metadata = std::fs::metadata(&fd_path)
                     .map_err(|e| eyre::eyre!("Failed to stat FD {}: {}", fd, e))?;
                 (metadata.dev(), metadata.ino())
@@ -256,7 +257,6 @@ pub fn execute_setup_op(op: &SetupOp) -> Result<()> {
             // Verify that what we mounted is what we intended (race condition detection)
             // This matches bubblewrap's implementation - see bubblewrap.c lines 1266-1273
             let mount_stat = {
-                use std::os::unix::fs::MetadataExt;
                 let metadata = std::fs::metadata(dest).map_err(|e| {
                     eyre::eyre!("Failed to stat mount at {}: {}", dest.display(), e)
                 })?;

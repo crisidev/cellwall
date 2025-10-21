@@ -2,14 +2,14 @@
 
 use eyre::{Context, Result};
 use netlink_packet_core::{
-    NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REQUEST,
+    NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REQUEST, NetlinkMessage, NetlinkPayload,
 };
 use netlink_packet_route::{
+    AddressFamily, RouteNetlinkMessage,
     address::{AddressAttribute, AddressMessage, AddressScope},
     link::{LinkFlags, LinkMessage},
-    AddressFamily, RouteNetlinkMessage,
 };
-use netlink_sys::{protocols::NETLINK_ROUTE, Socket, SocketAddr};
+use netlink_sys::{Socket, SocketAddr, protocols::NETLINK_ROUTE};
 use std::net::Ipv4Addr;
 
 const LOOPBACK_IFNAME: &str = "lo";
@@ -121,7 +121,11 @@ fn send_and_receive_ack(
         .wrap_err("Failed to receive netlink response")?;
 
     let n = response_buf.len();
-    log::debug!("Received {} bytes from netlink (from pid {})", n, from_addr.port_number());
+    log::debug!(
+        "Received {} bytes from netlink (from pid {})",
+        n,
+        from_addr.port_number()
+    );
 
     if n == 0 {
         eyre::bail!("Received empty response from netlink");
@@ -134,7 +138,11 @@ fn send_and_receive_ack(
     }
 
     // Log the response bytes for debugging
-    log::debug!("Response bytes (first {}): {:02x?}", n.min(36), &response_buf[..n.min(36)]);
+    log::debug!(
+        "Response bytes (first {}): {:02x?}",
+        n.min(36),
+        &response_buf[..n.min(36)]
+    );
 
     let bytes = &response_buf[..];
 
@@ -192,6 +200,9 @@ mod tests {
         let result = send_and_receive_ack(&mut socket, nl_msg);
 
         // This will fail during tests, let's just grab the expected message
-        assert_eq!(result.unwrap_err().to_string(), "Netlink error code -22: ErrorMessage { code: Some(-22), header: [32, 0, 0, 0, 18, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] }");
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Netlink error code -22: ErrorMessage { code: Some(-22), header: [32, 0, 0, 0, 18, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] }"
+        );
     }
 }
