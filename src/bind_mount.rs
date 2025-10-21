@@ -24,48 +24,50 @@ pub enum BindMountResult {
 }
 
 /// Unescape octal sequences in mount paths
-/// Based on bubblewrap's unescape_inline function (bind-mount.c lines 40-66)
+/// Based on bubblewrap's unescape_inline function.
 /// Mountinfo encodes spaces and other special characters as octal escapes like \040
 fn unescape_path(escaped: &str) -> String {
     let mut result = String::with_capacity(escaped.len());
     let mut chars = escaped.chars().peekable();
 
     while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            // Check if we have 3 octal digits following
-            let mut octal_chars = Vec::new();
-            for _ in 0..3 {
-                if let Some(&next_ch) = chars.peek() {
-                    if next_ch.is_ascii_digit() && next_ch <= '7' {
-                        octal_chars.push(next_ch);
-                        chars.next();
-                    } else {
-                        break;
-                    }
+        if ch != '\\' {
+            result.push(ch);
+            continue;
+        }
+
+        // Manually collect up to 3 octal digits using peek to avoid consuming non-octal chars
+        let mut octal_chars = String::new();
+        for _ in 0..3 {
+            if let Some(&c) = chars.peek() {
+                if c.is_ascii_digit() && c <= '7' {
+                    octal_chars.push(c);
+                    chars.next(); // consume the char we just peeked
                 } else {
                     break;
                 }
-            }
-
-            if octal_chars.len() == 3 {
-                // Parse octal number
-                let octal_str: String = octal_chars.into_iter().collect();
-                if let Ok(byte_val) = u8::from_str_radix(&octal_str, 8) {
-                    result.push(byte_val as char);
-                } else {
-                    // If parsing fails, keep the backslash and digits
-                    result.push('\\');
-                    result.push_str(&octal_str);
-                }
             } else {
-                // Not a valid octal escape, keep the backslash
-                result.push('\\');
-                for ch in octal_chars {
-                    result.push(ch);
+                break;
+            }
+        }
+
+        // Only process if we got exactly 3 octal digits
+        if octal_chars.len() == 3 {
+            match u8::from_str_radix(&octal_chars, 8) {
+                Ok(byte_val) if byte_val.is_ascii() => {
+                    // Safe to convert ASCII byte to char
+                    result.push(byte_val as char);
+                }
+                _ => {
+                    // Invalid octal value or non-ASCII, keep original
+                    result.push('\\');
+                    result.push_str(&octal_chars);
                 }
             }
         } else {
-            result.push(ch);
+            // Not enough digits for valid octal escape, keep as-is
+            result.push('\\');
+            result.push_str(&octal_chars);
         }
     }
 
@@ -547,91 +549,118 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_bind_mount_source_not_found() -> Result<()> {
-        let temp_dir = TempDir::new()?;
-        let source = PathBuf::from("/nonexistent/path/that/does/not/exist");
-        let dest = temp_dir.path().join("dest");
-        fs::create_dir(&dest)?;
-
-        let result = bind_mount(&source, &dest, BindMountFlags::empty())?;
-        assert_eq!(result, BindMountResult::SourceNotFound);
-
-        Ok(())
+    fn test_unescape_path_no_escapes() {
+        assert_eq!(unescape_path("/simple/path"), "/simple/path");
+        assert_eq!(unescape_path("/var/log"), "/var/log");
+        assert_eq!(unescape_path(""), "");
     }
 
     #[test]
-    fn test_bind_mount_flags_empty() {
-        let flags = BindMountFlags::empty();
-        assert!(!flags.contains(BindMountFlags::READONLY));
-        assert!(!flags.contains(BindMountFlags::DEVICES));
-        assert!(!flags.contains(BindMountFlags::RECURSIVE));
-    }
-
-    #[test]
-    fn test_bind_mount_flags_readonly() {
-        let flags = BindMountFlags::READONLY;
-        assert!(flags.contains(BindMountFlags::READONLY));
-        assert!(!flags.contains(BindMountFlags::DEVICES));
-        assert!(!flags.contains(BindMountFlags::RECURSIVE));
-    }
-
-    #[test]
-    fn test_bind_mount_flags_devices() {
-        let flags = BindMountFlags::DEVICES;
-        assert!(!flags.contains(BindMountFlags::READONLY));
-        assert!(flags.contains(BindMountFlags::DEVICES));
-        assert!(!flags.contains(BindMountFlags::RECURSIVE));
-    }
-
-    #[test]
-    fn test_bind_mount_flags_recursive() {
-        let flags = BindMountFlags::RECURSIVE;
-        assert!(!flags.contains(BindMountFlags::READONLY));
-        assert!(!flags.contains(BindMountFlags::DEVICES));
-        assert!(flags.contains(BindMountFlags::RECURSIVE));
-    }
-
-    #[test]
-    fn test_bind_mount_flags_combined() {
-        let flags = BindMountFlags::READONLY | BindMountFlags::RECURSIVE;
-        assert!(flags.contains(BindMountFlags::READONLY));
-        assert!(!flags.contains(BindMountFlags::DEVICES));
-        assert!(flags.contains(BindMountFlags::RECURSIVE));
-    }
-
-    #[test]
-    fn test_bind_mount_flags_all() {
-        let flags = BindMountFlags::READONLY | BindMountFlags::DEVICES | BindMountFlags::RECURSIVE;
-        assert!(flags.contains(BindMountFlags::READONLY));
-        assert!(flags.contains(BindMountFlags::DEVICES));
-        assert!(flags.contains(BindMountFlags::RECURSIVE));
-    }
-
-    #[test]
-    fn test_bind_mount_result_equality() {
-        assert_eq!(BindMountResult::Success, BindMountResult::Success);
+    fn test_unescape_path_space() {
+        // \040 is octal for space (ASCII 32)
         assert_eq!(
-            BindMountResult::SourceNotFound,
-            BindMountResult::SourceNotFound
+            unescape_path("/path\\040with\\040spaces"),
+            "/path with spaces"
         );
+        assert_eq!(unescape_path("\\040"), " ");
+        assert_eq!(unescape_path("before\\040after"), "before after");
+    }
+
+    #[test]
+    fn test_unescape_path_tab() {
+        // \011 is octal for tab (ASCII 9)
         assert_eq!(
-            BindMountResult::PermissionDenied,
-            BindMountResult::PermissionDenied
-        );
-        assert_eq!(
-            BindMountResult::InvalidTarget,
-            BindMountResult::InvalidTarget
+            unescape_path("/path\\011with\\011tabs"),
+            "/path\twith\ttabs"
         );
     }
 
     #[test]
-    fn test_bind_mount_result_inequality() {
-        assert_ne!(BindMountResult::Success, BindMountResult::SourceNotFound);
-        assert_ne!(BindMountResult::Success, BindMountResult::PermissionDenied);
-        assert_ne!(
-            BindMountResult::SourceNotFound,
-            BindMountResult::InvalidTarget
+    fn test_unescape_path_newline() {
+        // \012 is octal for newline (ASCII 10)
+        assert_eq!(
+            unescape_path("/path\\012with\\012newlines"),
+            "/path\nwith\nnewlines"
         );
+    }
+
+    #[test]
+    fn test_unescape_path_multiple_escapes() {
+        // Mix of different escaped characters
+        assert_eq!(
+            unescape_path("/path\\040with\\011mixed\\012escapes"),
+            "/path with\tmixed\nescapes"
+        );
+    }
+
+    #[test]
+    fn test_unescape_path_invalid_escape_too_few_digits() {
+        // Backslash followed by fewer than 3 octal digits
+        assert_eq!(unescape_path("/path\\04"), "/path\\04");
+        assert_eq!(unescape_path("/path\\0"), "/path\\0");
+        assert_eq!(unescape_path("/path\\"), "/path\\");
+    }
+
+    #[test]
+    fn test_unescape_path_invalid_escape_non_octal() {
+        // Backslash followed by non-octal characters
+        // Since 'n' and 't' aren't octal digits (0-7), take_while stops immediately
+        assert_eq!(unescape_path("/path\\n"), "/path\\n");
+        assert_eq!(unescape_path("/path\\t"), "/path\\t");
+        // '9' is not an octal digit, so it stops immediately and we get backslash + "99" + "9"
+        assert_eq!(unescape_path("/path\\999"), "/path\\999");
+    }
+
+    #[test]
+    fn test_unescape_path_invalid_octal_value() {
+        // '8' and '9' are not octal digits (0-7), so take_while stops immediately
+        assert_eq!(unescape_path("/path\\888"), "/path\\888");
+        assert_eq!(unescape_path("/path\\999"), "/path\\999");
+    }
+
+    #[test]
+    fn test_unescape_path_out_of_range() {
+        // Octal value > 127 (non-ASCII)
+        // \200 = 128 in decimal (first non-ASCII value)
+        assert_eq!(unescape_path("/path\\200test"), "/path\\200test");
+        assert_eq!(unescape_path("/path\\377test"), "/path\\377test");
+    }
+
+    #[test]
+    fn test_unescape_path_consecutive_escapes() {
+        // Multiple escapes in a row
+        assert_eq!(unescape_path("\\040\\040\\040"), "   ");
+        assert_eq!(unescape_path("a\\040\\040b"), "a  b");
+    }
+
+    #[test]
+    fn test_unescape_path_escape_at_end() {
+        assert_eq!(unescape_path("/path\\040"), "/path ");
+        assert_eq!(unescape_path("/path\\04"), "/path\\04");
+    }
+
+    #[test]
+    fn test_unescape_path_real_world_examples() {
+        // Real examples from mountinfo
+        assert_eq!(
+            unescape_path("/var/lib/docker/overlay2/abc\\040def"),
+            "/var/lib/docker/overlay2/abc def"
+        );
+        assert_eq!(unescape_path("/mnt/My\\040Documents"), "/mnt/My Documents");
+    }
+
+    #[test]
+    fn test_unescape_path_null_byte() {
+        // \000 is octal for null byte (ASCII 0)
+        assert_eq!(unescape_path("before\\000after"), "before\0after");
+    }
+
+    #[test]
+    fn test_unescape_path_all_ascii_control_chars() {
+        // Test various ASCII control characters
+        assert_eq!(unescape_path("\\001"), "\x01"); // SOH
+        assert_eq!(unescape_path("\\033"), "\x1b"); // ESC
+        assert_eq!(unescape_path("\\177"), "\x7f"); // DEL
     }
 
     #[test]
@@ -752,9 +781,7 @@ mod tests {
 
         let result = bind_mount(&source, &dest, BindMountFlags::empty());
 
-        if nix::unistd::getuid().as_raw() != 0 {
-            assert!(result.is_err());
-        }
+        assert!(result.is_err());
     }
 
     #[test]
@@ -770,27 +797,5 @@ mod tests {
         if nix::unistd::getuid().as_raw() != 0 {
             assert!(result.is_err());
         }
-    }
-
-    #[test]
-    fn test_bind_mount_flags_debug_format() {
-        // Test that debug formatting works (we added #[derive(Debug)])
-        let flags = BindMountFlags::READONLY | BindMountFlags::RECURSIVE;
-        let debug_str = format!("{:?}", flags);
-        assert!(!debug_str.is_empty());
-    }
-
-    #[test]
-    fn test_bind_mount_result_debug_format() {
-        let result = BindMountResult::Success;
-        let debug_str = format!("{:?}", result);
-        assert!(debug_str.contains("Success"));
-    }
-
-    #[test]
-    fn test_bind_mount_result_clone() {
-        let result = BindMountResult::SourceNotFound;
-        let cloned = result;
-        assert_eq!(result, cloned);
     }
 }

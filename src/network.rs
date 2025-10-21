@@ -20,7 +20,6 @@ const NLMSG_DONE: u16 = 3;
 const AF_INET: u8 = 2;
 const AF_UNSPEC: u8 = 0;
 const RT_SCOPE_HOST: u8 = 254;
-const IFA_F_PERMANENT: u32 = 0x80;
 const IFA_LOCAL: u16 = 2;
 const IFA_ADDRESS: u16 = 1;
 const IFF_UP: i16 = 1;
