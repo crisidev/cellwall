@@ -12,11 +12,16 @@ PROJECT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 CELLWALL="${CELLWALL:-$PROJECT_DIR/target/debug/cw}"
 
 # Parse command line arguments
+export RUST_LOG=error
 RUN_ROOT_TESTS=false
 while [[ $# -gt 0 ]]; do
     case $1 in
         --with-sudo)
             RUN_ROOT_TESTS=true
+            shift
+            ;;
+        --debug)
+            export RUST_LOG=debug
             shift
             ;;
         *)
@@ -68,9 +73,6 @@ assert_not_file_has_content() {
 
 TESTDIR=$(mktemp -d /tmp/cellwall-test.XXXXXX)
 cd "$TESTDIR"
-
-# Disable logging noise
-export RUST_LOG=error
 
 echo "Testing cellwall..."
 echo
@@ -197,8 +199,14 @@ else
     fail "unsetenv"
 fi
 
-if $CELLWALL --clearenv sh -c 'env | wc -l' > out 2>&1 && [ "$(cat out)" -lt 5 ]; then
-    pass "clearenv"
+if $CELLWALL --clearenv sh -c 'env | wc -l' > out 2>&1; then
+    # Extract just the number, filtering out any debug log lines
+    result=$(grep -v '^\[' out | grep -v '^$' | tail -1)
+    if [ -n "$result" ] && [ "$result" -lt 5 ]; then
+        pass "clearenv"
+    else
+        fail "clearenv"
+    fi
 else
     fail "clearenv"
 fi
