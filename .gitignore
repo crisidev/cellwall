@@ -3,3 +3,5 @@ tarpaulin-report.html
 target/
 .coverage
 .direnv
+bubblewrap/
+shell.sh
