@@ -3,6 +3,8 @@
 use eyre::{Context, Result};
 use nix::mount::{MsFlags, mount};
 use std::fs;
+use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
 bitflags::bitflags! {
@@ -391,9 +393,8 @@ pub(crate) fn bind_mount<P: AsRef<Path>, Q: AsRef<Path>>(
 
     // Apply flags to all submounts when using recursive bind mounts
     // This is necessary because bind mounts don't automatically apply flags to submounts
-    // See bubblewrap bind-mount.c lines 461-486
     //
-    // The key insight from bubblewrap:
+    // Key concepts from bubblewrap:
     // 1. Use realpath() on the destination AFTER the mount to resolve symlinks
     // 2. Open the destination with O_PATH and readlink /proc/self/fd/<fd>
     // 3. Parse mountinfo using the kernel's path representation
@@ -416,9 +417,6 @@ pub(crate) fn bind_mount<P: AsRef<Path>, Q: AsRef<Path>>(
         // Open the destination with O_PATH to get a file descriptor
         // Then read /proc/self/fd/<fd> to get the kernel's path representation
         // This handles case-insensitive filesystems correctly (bubblewrap lines 408-436)
-        use std::os::unix::fs::OpenOptionsExt;
-        use std::os::unix::io::AsRawFd;
-
         let dest_file = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_PATH | libc::O_CLOEXEC)

@@ -7,7 +7,7 @@ use std::fs;
 use std::os::unix::io::RawFd;
 
 /// Unshare namespaces based on flags
-pub fn unshare_namespaces(flags: CloneFlags) -> Result<()> {
+pub(crate) fn unshare_namespaces(flags: CloneFlags) -> Result<()> {
     log::debug!("Calling unshare() with flags: {:?}", flags);
     unshare(flags).wrap_err("Failed to unshare namespaces")?;
     log::debug!("unshare() syscall succeeded");
@@ -16,7 +16,7 @@ pub fn unshare_namespaces(flags: CloneFlags) -> Result<()> {
 
 /// Write UID/GID mappings for user namespace
 #[allow(clippy::too_many_arguments)]
-pub fn write_uid_gid_map(
+pub(crate) fn write_uid_gid_map(
     _proc_fd: RawFd,
     sandbox_uid: Uid,
     parent_uid: Uid,

@@ -10,6 +10,8 @@ use eyre::{Context, Result};
 use nix::sched::CloneFlags;
 use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::{ForkResult, Gid, Uid, chdir, fork, getgid, getuid, setsid};
+use std::io::Read;
+use std::os::fd::FromRawFd;
 use std::path::PathBuf;
 
 /// Main sandbox configuration
@@ -547,62 +549,57 @@ impl SandboxConfig {
 
 /// Set no new privileges flag (safer wrapper around prctl)
 fn set_no_new_privs() -> Result<()> {
-    unsafe {
-        let ret = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-        if ret != 0 {
-            eyre::bail!(
-                "Failed to set PR_SET_NO_NEW_PRIVS: {}",
-                std::io::Error::last_os_error()
-            );
-        }
+    let ret = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+    if ret != 0 {
+        eyre::bail!(
+            "Failed to set PR_SET_NO_NEW_PRIVS: {}",
+            std::io::Error::last_os_error()
+        );
     }
     Ok(())
 }
 
 /// Load seccomp BPF program (safer wrapper around prctl)
-unsafe fn load_seccomp_bpf(prog: *const libc::c_void) -> Result<()> {
-    unsafe {
-        const PR_SET_SECCOMP: libc::c_int = 22;
-        const SECCOMP_MODE_FILTER: libc::c_ulong = 2;
-
-        let ret = libc::prctl(
+fn load_seccomp_bpf(prog: *const libc::c_void) -> Result<()> {
+    const PR_SET_SECCOMP: libc::c_int = 22;
+    const SECCOMP_MODE_FILTER: libc::c_ulong = 2;
+    let ret = unsafe {
+        libc::prctl(
             PR_SET_SECCOMP,
             SECCOMP_MODE_FILTER,
             prog as libc::c_ulong,
             0,
             0,
+        )
+    };
+
+    if ret != 0 {
+        eyre::bail!(
+            "Failed to load seccomp filter: {}",
+            std::io::Error::last_os_error()
         );
-
-        if ret != 0 {
-            eyre::bail!(
-                "Failed to load seccomp filter: {}",
-                std::io::Error::last_os_error()
-            );
-        }
-
-        Ok(())
     }
+
+    Ok(())
 }
 
-/// Read from file descriptor (safer wrapper around libc::read)
+/// Read from file descriptor using safe Rust
 fn read_fd(fd: i32, buf: &mut [u8]) -> Result<usize> {
-    unsafe {
-        let n = libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len());
-        if n < 0 {
-            eyre::bail!(
-                "Failed to read from FD: {}",
-                std::io::Error::last_os_error()
-            );
-        }
-        Ok(n as usize)
-    }
+    // SAFETY: We're creating a temporary File from the raw FD.
+    // We use ManuallyDrop to prevent the File from closing the FD when dropped.
+    // This is safe because:
+    // 1. We don't take ownership of the FD
+    // 2. We only read from it
+    // 3. The caller maintains ownership and responsibility for closing it
+    let mut file = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });
+
+    file.read(buf).wrap_err("Failed to read from FD")
 }
 
 /// Load seccomp filter from file descriptor
 fn load_seccomp_from_fd(fd: i32) -> Result<()> {
     // Read the seccomp BPF program from the file descriptor
-    // IMPORTANT: We must not take ownership of the FD (no from_raw_fd)
-    // as that would close it when dropped, causing IO Safety violations
+    // read_fd uses ManuallyDrop to prevent closing the FD when dropped
     let mut buffer = Vec::new();
     loop {
         let mut chunk = [0u8; 4096];
@@ -621,47 +618,43 @@ fn load_seccomp_from_fd(fd: i32) -> Result<()> {
 
     let filter_len = buffer.len() / 8;
 
+    // Prepare the sock_fprog structure
+    // IMPORTANT: We use the buffer directly and don't drop it until after exec
+    #[repr(C)]
+    struct sock_fprog {
+        len: libc::c_ushort,
+        filter: *const libc::sock_filter,
+    }
+
+    let prog = sock_fprog {
+        len: filter_len as libc::c_ushort,
+        filter: buffer.as_ptr() as *const libc::sock_filter,
+    };
+
     // First, set NO_NEW_PRIVS to allow seccomp without CAP_SYS_ADMIN
     set_no_new_privs()?;
 
-    unsafe {
-        // Prepare the sock_fprog structure
-        // IMPORTANT: We use the buffer directly and don't drop it until after exec
-        #[repr(C)]
-        struct sock_fprog {
-            len: libc::c_ushort,
-            filter: *const libc::sock_filter,
-        }
+    // Load the seccomp filter
+    load_seccomp_bpf(&prog as *const _ as *const libc::c_void)?;
 
-        let prog = sock_fprog {
-            len: filter_len as libc::c_ushort,
-            filter: buffer.as_ptr() as *const libc::sock_filter,
-        };
-
-        // Load the seccomp filter
-        load_seccomp_bpf(&prog as *const _ as *const libc::c_void)?;
-
-        // NOTE: We don't log here because we're already under seccomp!
-        // Any Rust operations after loading seccomp can be dangerous
-
-        // Keep buffer alive - the kernel makes a copy, so we don't need to leak it
-        // but we want to make sure it lives until after the prctl call
-        std::mem::forget(buffer);
-    }
+    // NOTE: We don't log here because we're already under seccomp!
+    // Any Rust operations after loading seccomp can be dangerous
+    //
+    // Keep buffer alive - the kernel makes a copy, so we don't need to leak it
+    // but we want to make sure it lives until after the prctl call
+    std::mem::forget(buffer);
 
     Ok(())
 }
 
 /// Set parent death signal (safer wrapper around prctl)
 fn set_pdeathsig(sig: libc::c_int) -> Result<()> {
-    unsafe {
-        let ret = libc::prctl(libc::PR_SET_PDEATHSIG, sig, 0, 0, 0);
-        if ret != 0 {
-            eyre::bail!(
-                "Failed to set parent death signal: {}",
-                std::io::Error::last_os_error()
-            );
-        }
+    let ret = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, sig, 0, 0, 0) };
+    if ret != 0 {
+        eyre::bail!(
+            "Failed to set parent death signal: {}",
+            std::io::Error::last_os_error()
+        );
     }
     Ok(())
 }
