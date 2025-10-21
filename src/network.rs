@@ -16,7 +16,7 @@ const LOOPBACK_IFNAME: &str = "lo";
 
 /// Set up loopback interface in the network namespace
 /// Based on bubblewrap's loopback_setup function in network.c
-pub fn setup_loopback() -> Result<()> {
+pub(crate) fn setup_loopback() -> Result<()> {
     log::debug!("Setting up loopback interface with netlink");
 
     // Get loopback interface index

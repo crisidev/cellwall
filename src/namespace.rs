@@ -2,34 +2,9 @@
 
 use eyre::{Context, Result};
 use nix::sched::{CloneFlags, unshare};
-use nix::sys::stat::stat;
 use nix::unistd::{Gid, Pid, Uid};
 use std::fs;
 use std::os::unix::io::RawFd;
-
-/// Namespace information
-#[derive(Debug, Clone)]
-pub struct NamespaceInfo {
-    pub name: &'static str,
-    pub id: Option<u64>,
-}
-
-impl NamespaceInfo {
-    pub const fn new(name: &'static str) -> Self {
-        Self { name, id: None }
-    }
-
-    /// Read namespace ID for a process
-    pub fn read_for_pid(&mut self, _proc_fd: RawFd, pid: Pid) -> Result<()> {
-        let ns_path = format!("{}/ns/{}", pid, self.name);
-
-        if let Ok(st) = stat(ns_path.as_str()) {
-            self.id = Some(st.st_ino);
-        }
-
-        Ok(())
-    }
-}
 
 /// Unshare namespaces based on flags
 pub fn unshare_namespaces(flags: CloneFlags) -> Result<()> {
@@ -117,14 +92,4 @@ pub fn write_uid_gid_map(
     log::debug!("Successfully wrote gid_map");
 
     Ok(())
-}
-
-/// Check if user namespaces are available
-pub fn user_namespaces_available() -> bool {
-    stat("/proc/self/ns/user").is_ok()
-}
-
-/// Check if cgroup namespaces are available
-pub fn cgroup_namespaces_available() -> bool {
-    stat("/proc/self/ns/cgroup").is_ok()
 }

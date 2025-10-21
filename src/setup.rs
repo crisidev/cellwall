@@ -12,7 +12,7 @@ use crate::utils::{create_parent_dirs, ensure_dir, ensure_file};
 
 /// Setup operation types
 #[derive(Debug, Clone)]
-pub enum SetupOp {
+pub(crate) enum SetupOp {
     BindMount {
         source: PathBuf,
         dest: PathBuf,
@@ -34,11 +34,6 @@ pub enum SetupOp {
     CreateDir {
         path: PathBuf,
         mode: u32,
-    },
-    CreateFile {
-        path: PathBuf,
-        mode: u32,
-        contents: Vec<u8>,
     },
     CreateSymlink {
         source: String,
@@ -66,7 +61,7 @@ pub enum SetupOp {
 }
 
 /// Execute a setup operation
-pub fn execute_setup_op(op: &SetupOp) -> Result<()> {
+pub(crate) fn execute_setup_op(op: &SetupOp) -> Result<()> {
     match op {
         SetupOp::BindMount {
             source,
@@ -125,17 +120,6 @@ pub fn execute_setup_op(op: &SetupOp) -> Result<()> {
             log::debug!("Creating directory {}", path.display());
             create_parent_dirs(path, 0o755)?;
             ensure_dir(path, *mode)?;
-        }
-
-        SetupOp::CreateFile {
-            path,
-            mode,
-            contents,
-        } => {
-            log::debug!("Creating file {}", path.display());
-            create_parent_dirs(path, 0o755)?;
-            fs::write(path, contents)?;
-            fs::set_permissions(path, std::fs::Permissions::from_mode(*mode))?;
         }
 
         SetupOp::CreateSymlink { source, dest } => {

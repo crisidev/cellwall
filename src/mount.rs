@@ -1,11 +1,11 @@
 //! Filesystem mount operations
 
 use eyre::{Context, Result};
-use nix::mount::{MntFlags, MsFlags, mount, umount2};
+use nix::mount::{MsFlags, mount};
 use std::path::{Path, PathBuf};
 
 /// Mount proc filesystem
-pub fn mount_proc<P: AsRef<Path>>(target: P) -> Result<()> {
+pub(crate) fn mount_proc<P: AsRef<Path>>(target: P) -> Result<()> {
     log::debug!("Mounting proc filesystem at {}", target.as_ref().display());
     mount(
         Some("proc"),
@@ -95,7 +95,7 @@ fn cover_dangerous_proc_dirs<P: AsRef<Path>>(proc_mount: P) -> Result<()> {
 }
 
 /// Mount tmpfs filesystem
-pub fn mount_tmpfs<P: AsRef<Path>>(target: P, mode: u32, size: Option<usize>) -> Result<()> {
+pub(crate) fn mount_tmpfs<P: AsRef<Path>>(target: P, mode: u32, size: Option<usize>) -> Result<()> {
     let options = if let Some(s) = size {
         format!("mode={:o},size={}", mode, s)
     } else {
@@ -121,7 +121,7 @@ pub fn mount_tmpfs<P: AsRef<Path>>(target: P, mode: u32, size: Option<usize>) ->
 }
 
 /// Mount devpts filesystem
-pub fn mount_devpts<P: AsRef<Path>>(target: P) -> Result<()> {
+pub(crate) fn mount_devpts<P: AsRef<Path>>(target: P) -> Result<()> {
     log::debug!("Mounting devpts at {}", target.as_ref().display());
     mount(
         Some("devpts"),
@@ -136,24 +136,8 @@ pub fn mount_devpts<P: AsRef<Path>>(target: P) -> Result<()> {
     Ok(())
 }
 
-/// Mount mqueue filesystem
-pub fn mount_mqueue<P: AsRef<Path>>(target: P) -> Result<()> {
-    log::debug!("Mounting mqueue at {}", target.as_ref().display());
-    mount(
-        Some("mqueue"),
-        target.as_ref(),
-        Some("mqueue"),
-        MsFlags::MS_SILENT,
-        None::<&str>,
-    )
-    .wrap_err_with(|| format!("Failed to mount mqueue on {}", target.as_ref().display()))?;
-    log::debug!("Successfully mounted mqueue");
-
-    Ok(())
-}
-
 /// Remount filesystem as read-only
-pub fn remount_ro<P: AsRef<Path>>(target: P) -> Result<()> {
+pub(crate) fn remount_ro<P: AsRef<Path>>(target: P) -> Result<()> {
     log::debug!("Remounting {} as read-only", target.as_ref().display());
     mount(
         None::<&str>,
@@ -173,24 +157,8 @@ pub fn remount_ro<P: AsRef<Path>>(target: P) -> Result<()> {
     Ok(())
 }
 
-/// Make mount point private (don't propagate mounts)
-pub fn make_private<P: AsRef<Path>>(target: P) -> Result<()> {
-    log::debug!("Making {} private", target.as_ref().display());
-    mount(
-        None::<&str>,
-        target.as_ref(),
-        None::<&str>,
-        MsFlags::MS_PRIVATE | MsFlags::MS_REC,
-        None::<&str>,
-    )
-    .wrap_err_with(|| format!("Failed to make {} private", target.as_ref().display()))?;
-    log::debug!("Successfully made mount private");
-
-    Ok(())
-}
-
 /// Make mount point slave (receive but don't propagate)
-pub fn make_slave<P: AsRef<Path>>(target: P) -> Result<()> {
+pub(crate) fn make_slave<P: AsRef<Path>>(target: P) -> Result<()> {
     log::debug!("Making {} slave", target.as_ref().display());
     mount(
         None::<&str>,
@@ -201,20 +169,6 @@ pub fn make_slave<P: AsRef<Path>>(target: P) -> Result<()> {
     )
     .wrap_err_with(|| format!("Failed to make {} slave", target.as_ref().display()))?;
     log::debug!("Successfully made mount slave");
-
-    Ok(())
-}
-
-/// Unmount filesystem
-pub fn unmount<P: AsRef<Path>>(target: P, detach: bool) -> Result<()> {
-    let flags = if detach {
-        MntFlags::MNT_DETACH
-    } else {
-        MntFlags::empty()
-    };
-
-    umount2(target.as_ref(), flags)
-        .wrap_err_with(|| format!("Failed to unmount {}", target.as_ref().display()))?;
 
     Ok(())
 }
@@ -347,24 +301,6 @@ mod tests {
     }
 
     #[test]
-    fn test_mount_mqueue_nonexistent_target() {
-        let result = mount_mqueue("/nonexistent/mqueue/mount/point");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_mount_mqueue_needs_privileges() {
-        let tmp = TempDir::new().unwrap();
-        let target = tmp.path().join("mqueue");
-        std::fs::create_dir(&target).unwrap();
-
-        let result = mount_mqueue(&target);
-        if nix::unistd::getuid().as_raw() != 0 {
-            assert!(result.is_err());
-        }
-    }
-
-    #[test]
     fn test_remount_ro_nonexistent_target() {
         let result = remount_ro("/nonexistent/mount/point");
         assert!(result.is_err());
@@ -382,22 +318,6 @@ mod tests {
     }
 
     #[test]
-    fn test_make_private_nonexistent_target() {
-        let result = make_private("/nonexistent/mount/point");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_make_private_not_mounted() {
-        let tmp = TempDir::new().unwrap();
-        let target = tmp.path().join("notmounted");
-        std::fs::create_dir(&target).unwrap();
-
-        let result = make_private(&target);
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn test_make_slave_nonexistent_target() {
         let result = make_slave("/nonexistent/mount/point");
         assert!(result.is_err());
@@ -410,33 +330,6 @@ mod tests {
         std::fs::create_dir(&target).unwrap();
 
         let result = make_slave(&target);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_unmount_nonexistent_target() {
-        let result = unmount("/nonexistent/mount/point", false);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_unmount_not_mounted() {
-        let tmp = TempDir::new().unwrap();
-        let target = tmp.path().join("notmounted");
-        std::fs::create_dir(&target).unwrap();
-
-        let result = unmount(&target, false);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_unmount_with_detach_flag() {
-        let tmp = TempDir::new().unwrap();
-        let target = tmp.path().join("notmounted");
-        std::fs::create_dir(&target).unwrap();
-
-        // Even with detach flag, unmounting non-mounted directory should fail
-        let result = unmount(&target, true);
         assert!(result.is_err());
     }
 }

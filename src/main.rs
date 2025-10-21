@@ -4,8 +4,7 @@ use clap::Parser;
 use eyre::Result;
 use nix::unistd::{getgid, getuid};
 
-use cellwall::cli::Args;
-use cellwall::sandbox::SandboxConfig;
+use cellwall::{Args, SandboxConfig};
 
 fn main() -> Result<()> {
     color_eyre::install()?;

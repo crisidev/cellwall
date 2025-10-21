@@ -16,11 +16,9 @@ bitflags::bitflags! {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BindMountResult {
+pub(crate) enum BindMountResult {
     Success,
     SourceNotFound,
-    PermissionDenied,
-    InvalidTarget,
 }
 
 /// Unescape octal sequences in mount paths
@@ -289,7 +287,7 @@ fn parse_submounts(root_mount: &Path) -> Result<Vec<(PathBuf, MsFlags)>> {
 }
 
 /// Perform a bind mount
-pub fn bind_mount<P: AsRef<Path>, Q: AsRef<Path>>(
+pub(crate) fn bind_mount<P: AsRef<Path>, Q: AsRef<Path>>(
     source: P,
     dest: Q,
     flags: BindMountFlags,

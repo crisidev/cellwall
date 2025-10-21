@@ -1,82 +1,9 @@
 //! Utility functions
 
 use eyre::{Result, bail};
-use nix::fcntl::{OFlag, openat};
-use nix::sys::stat::Mode;
-use nix::unistd::{close, read};
 use std::fs::{self, File, Permissions};
-use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::io::RawFd;
 use std::path::Path;
-
-/// Read all data from a file descriptor into a Vec
-pub fn read_fd_to_vec<Fd: AsFd>(fd: Fd) -> Result<Vec<u8>> {
-    let mut buffer = Vec::new();
-    let mut chunk = [0u8; 4096];
-
-    loop {
-        match read(&fd, &mut chunk) {
-            Ok(0) => break,
-            Ok(n) => buffer.extend_from_slice(&chunk[..n]),
-            Err(nix::errno::Errno::EINTR) => continue,
-            Err(e) => return Err(e.into()),
-        }
-    }
-
-    Ok(buffer)
-}
-
-/// Read file contents as string from a directory fd
-pub fn read_file_at(dirfd: RawFd, path: &str) -> Result<String> {
-    if dirfd < 0 {
-        // If no dirfd provided, use normal file operations
-        return Ok(fs::read_to_string(path)?);
-    }
-
-    // Create a BorrowedFd from the raw fd
-    let borrowed_dirfd = unsafe { BorrowedFd::borrow_raw(dirfd) };
-
-    let fd = openat(
-        borrowed_dirfd,
-        path,
-        OFlag::O_RDONLY | OFlag::O_CLOEXEC,
-        Mode::empty(),
-    )?;
-
-    let contents = read_fd_to_vec(&fd)?;
-    close(fd)?;
-
-    Ok(String::from_utf8(contents)?)
-}
-
-/// Write string to a file relative to a directory fd
-pub fn write_file_at(dirfd: RawFd, path: &str, contents: &str) -> Result<()> {
-    if dirfd < 0 {
-        // If no dirfd provided, use normal file operations
-        return Ok(fs::write(path, contents)?);
-    }
-
-    // Create a BorrowedFd from the raw dirfd
-    let borrowed_dirfd = unsafe { BorrowedFd::borrow_raw(dirfd) };
-
-    let fd = openat(
-        borrowed_dirfd,
-        path,
-        OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_TRUNC | OFlag::O_CLOEXEC,
-        Mode::S_IRUSR | Mode::S_IWUSR | Mode::S_IRGRP | Mode::S_IROTH,
-    )?;
-
-    nix::unistd::write(&fd, contents.as_bytes())?;
-    close(fd)?;
-
-    Ok(())
-}
-
-/// Check if path is a directory
-pub fn is_dir<P: AsRef<Path>>(path: P) -> Result<bool> {
-    Ok(fs::metadata(path.as_ref())?.is_dir())
-}
 
 /// Ensure a directory exists with given permissions
 pub fn ensure_dir<P: AsRef<Path>>(path: P, mode: u32) -> Result<()> {
@@ -115,22 +42,6 @@ pub fn create_parent_dirs<P: AsRef<Path>>(path: P, mode: u32) -> Result<()> {
         fs::create_dir_all(parent)?;
         fs::set_permissions(parent, Permissions::from_mode(mode))?;
     }
-    Ok(())
-}
-
-/// Close all file descriptors except the ones in the excluded list
-pub fn close_extra_fds(excluded: &[RawFd]) -> Result<()> {
-    for entry in fs::read_dir("/proc/self/fd")? {
-        let entry = entry?;
-        if let Ok(fd_str) = entry.file_name().into_string()
-            && let Ok(fd) = fd_str.parse::<RawFd>()
-            && !excluded.contains(&fd)
-            && fd > 2
-        {
-            close(fd).ok();
-        }
-    }
-
     Ok(())
 }
 
@@ -236,29 +147,5 @@ mod tests {
         assert!(dir_path.is_dir());
 
         Ok(())
-    }
-
-    #[test]
-    fn test_is_dir_true() -> Result<()> {
-        let tmp = TempDir::new()?;
-        assert!(is_dir(tmp.path())?);
-        Ok(())
-    }
-
-    #[test]
-    fn test_is_dir_false() -> Result<()> {
-        let tmp = TempDir::new()?;
-        let file_path = tmp.path().join("file");
-        File::create(&file_path)?;
-
-        assert!(!is_dir(&file_path)?);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_is_dir_nonexistent() {
-        let result = is_dir("/nonexistent/path");
-        assert!(result.is_err());
     }
 }
